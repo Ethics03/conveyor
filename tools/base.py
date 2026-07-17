@@ -7,10 +7,11 @@ from pathlib import Path
 from types import UnionType
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
-from agent.models import ToolPermission, ToolResult
+from agent.models import ToolCall, ToolPermission, ToolResult
 from providers.base import ToolSchema
 
-ToolExecutor = Callable[[dict[str, Any], "ExecutionContext"], Awaitable[ToolResult]]
+ToolOutput = str | int | float | bool | dict[str, Any] | list[Any] | None
+ToolExecutor = Callable[[dict[str, Any], "ExecutionContext"], Awaitable[ToolOutput]]
 
 
 @dataclass(slots=True)
@@ -58,8 +59,8 @@ def tool(
     permission: ToolPermission,
     name: str | None = None,
     description: str | None = None,
-) -> Callable[[Callable[..., Awaitable[ToolResult]]], Tool]:
-    def decorator(fn: Callable[..., Awaitable[ToolResult]]) -> Tool:
+) -> Callable[[Callable[..., Awaitable[ToolOutput]]], Tool]:
+    def decorator(fn: Callable[..., Awaitable[ToolOutput]]) -> Tool:
         if not inspect.iscoroutinefunction(fn):
             raise TypeError(f"Tool function must be async: {fn.__name__}")
 
@@ -115,3 +116,41 @@ class ToolRegistry:
 
     def schemas(self) -> list[ToolSchema]:
         return [tool.schema for tool in self._tools.values()]
+
+    async def execute(
+        self, tool_call: ToolCall, context: ExecutionContext
+    ) -> ToolResult:
+        tool = self.get(tool_call.name)
+        if tool is None:
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                name=tool_call.name,
+                ok=False,
+                content=f"Unknown tool: {tool_call.name}",
+            )
+
+        try:
+            output = await tool.execute(tool_call.arguments, context)
+        except Exception as exc:
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                name=tool.name,
+                ok=False,
+                content=str(exc),
+            )
+
+        return ToolResult(
+            tool_call_id=tool_call.id,
+            name=tool.name,
+            ok=True,
+            content=_stringify_output(output),
+            metadata={"permission": tool.permission},
+        )
+
+
+def _stringify_output(output: ToolOutput) -> str:
+    if output is None:
+        return ""
+    if isinstance(output, str):
+        return output
+    return repr(output)
