@@ -3,7 +3,8 @@ from __future__ import annotations
 import pytest
 
 from agent.models import ToolCall
-from tools.base import ExecutionContext, ToolRegistry, tool
+from tools.base import ExecutionContext, tool
+from tools.registry import ToolRegistry
 
 
 @pytest.mark.anyio
@@ -32,6 +33,38 @@ async def test_tool_decorator_builds_schema_and_executes(tmp_path) -> None:
     assert result.name == "echo"
     assert result.content == "haha"
     assert result.metadata == {"permission": "read"}
+
+
+def test_registry_registers_tools_and_exposes_sorted_metadata() -> None:
+    @tool(permission="write")
+    async def zebra() -> str:
+        return "z"
+
+    @tool(permission="read")
+    async def alpha() -> str:
+        return "a"
+
+    registry = ToolRegistry([zebra])
+    registry.register(alpha)
+
+    assert registry.names() == ["alpha", "zebra"]
+    assert registry.permissions() == {"alpha": "read", "zebra": "write"}
+    assert [schema.name for schema in registry.schemas()] == ["alpha", "zebra"]
+
+
+def test_registry_rejects_duplicate_tool_names() -> None:
+    @tool(permission="read")
+    async def duplicate() -> str:
+        return "one"
+
+    @tool(permission="read", name="duplicate")
+    async def another() -> str:
+        return "two"
+
+    registry = ToolRegistry([duplicate])
+
+    with pytest.raises(ValueError, match="Tool already registered: duplicate"):
+        registry.register(another)
 
 
 @pytest.mark.anyio

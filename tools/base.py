@@ -5,13 +5,15 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import UnionType
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import Any, Union, cast, get_args, get_origin, get_type_hints
 
-from agent.models import ToolCall, ToolPermission, ToolResult
+from agent.models import ToolPermission
 from providers.base import ToolSchema
 
-ToolOutput = str | int | float | bool | dict[str, Any] | list[Any] | None
-ToolExecutor = Callable[[dict[str, Any], "ExecutionContext"], Awaitable[ToolOutput]]
+JsonValue = str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
+JsonObject = dict[str, JsonValue]
+ToolOutput = JsonValue
+ToolExecutor = Callable[[JsonObject, "ExecutionContext"], Awaitable[ToolOutput]]
 
 
 @dataclass(slots=True)
@@ -40,7 +42,7 @@ _TYPE_MAP: dict[type, str] = {
 }
 
 
-def _json_type(annotation: Any) -> str:
+def _json_type(annotation: object) -> str:
     origin = get_origin(annotation)
     if origin in (Union, UnionType):
         args = [a for a in get_args(annotation) if a is not type(None)]
@@ -64,19 +66,20 @@ def tool(
         if not inspect.iscoroutinefunction(fn):
             raise TypeError(f"Tool function must be async: {fn.__name__}")
 
-        hints = get_type_hints(fn)
+        hints: dict[str, object] = get_type_hints(fn)
         signature = inspect.signature(fn)
-        properties: dict[str, Any] = {}
+        properties: JsonObject = {}
         required: list[str] = []
         wants_context = False
 
         for param_name, param in signature.parameters.items():
-            annotation = hints.get(param_name, str)
+            annotation: object = hints.get(param_name, str)
             if annotation is ExecutionContext:
                 wants_context = True
                 continue
             properties[param_name] = {"type": _json_type(annotation)}
-            if param.default is inspect.Parameter.empty:
+            default: object = param.default
+            if default is inspect.Parameter.empty:
                 required.append(param_name)
 
         schema = ToolSchema(
@@ -90,62 +93,16 @@ def tool(
         )
 
         async def execute(
-            arguments: dict[str, Any], context: ExecutionContext
-        ) -> ToolResult:
-            kwargs = dict(arguments)
+            arguments: JsonObject, context: ExecutionContext
+        ) -> ToolOutput:
+            kwargs: dict[str, object] = dict(arguments)
             if wants_context:
                 kwargs["context"] = context
-            return await fn(**kwargs)
+            return await fn(**cast(dict[str, Any], kwargs))
 
         return Tool(schema=schema, permission=permission, execute=execute)
 
     return decorator
-
-
-class ToolRegistry:
-    def __init__(self) -> None:
-        self._tools: dict[str, Tool] = {}
-
-    def register(self, tool: Tool) -> None:
-        if tool.name in self._tools:
-            raise ValueError(f"Tool already registered: {tool.name}")
-        self._tools[tool.name] = tool
-
-    def get(self, name: str) -> Tool | None:
-        return self._tools.get(name)
-
-    def schemas(self) -> list[ToolSchema]:
-        return [tool.schema for tool in self._tools.values()]
-
-    async def execute(
-        self, tool_call: ToolCall, context: ExecutionContext
-    ) -> ToolResult:
-        tool = self.get(tool_call.name)
-        if tool is None:
-            return ToolResult(
-                tool_call_id=tool_call.id,
-                name=tool_call.name,
-                ok=False,
-                content=f"Unknown tool: {tool_call.name}",
-            )
-
-        try:
-            output = await tool.execute(tool_call.arguments, context)
-        except Exception as exc:
-            return ToolResult(
-                tool_call_id=tool_call.id,
-                name=tool.name,
-                ok=False,
-                content=str(exc),
-            )
-
-        return ToolResult(
-            tool_call_id=tool_call.id,
-            name=tool.name,
-            ok=True,
-            content=_stringify_output(output),
-            metadata={"permission": tool.permission},
-        )
 
 
 def _stringify_output(output: ToolOutput) -> str:

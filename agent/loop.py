@@ -17,6 +17,7 @@ from agent.models import (
 )
 from providers.base import Provider, ProviderRequest
 from storage.store import Store
-from tools.base import ExecutionContext, ToolRegistry
+from tools.base import ExecutionContext
+from tools.registry import ToolRegistry
 
 MAX_ITERATIONS = 20
