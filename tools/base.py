@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import inspect
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from types import UnionType
-from typing import Any, Union, cast, get_args, get_origin, get_type_hints
+from types import NoneType, UnionType
+from typing import Any, cast, get_args, get_origin
 
 from agent.models import ToolPermission
 from providers.base import ToolSchema
@@ -43,15 +44,16 @@ _TYPE_MAP: dict[type, str] = {
 
 
 def _json_type(annotation: object) -> str:
-    origin = get_origin(annotation)
-    if origin in (Union, UnionType):
-        args = [a for a in get_args(annotation) if a is not type(None)]
+    if isinstance(annotation, UnionType):
+        union_args = cast(tuple[object, ...], get_args(annotation))
+        args = [arg for arg in union_args if arg is not NoneType]
         if len(args) != 1:
             raise TypeError(f"Unsupported union type: {annotation}")
         return _json_type(args[0])
+    origin = cast(object | None, get_origin(annotation))
     if origin is not None:
-        annotation = origin
-    if annotation in _TYPE_MAP:
+        return _json_type(origin)
+    if isinstance(annotation, type) and annotation in _TYPE_MAP:
         return _TYPE_MAP[annotation]
     raise TypeError(f"Unsupported parameter type: {annotation}")
 
@@ -66,14 +68,13 @@ def tool(
         if not inspect.iscoroutinefunction(fn):
             raise TypeError(f"Tool function must be async: {fn.__name__}")
 
-        hints: dict[str, object] = get_type_hints(fn)
         signature = inspect.signature(fn)
         properties: JsonObject = {}
         required: list[str] = []
         wants_context = False
 
         for param_name, param in signature.parameters.items():
-            annotation: object = hints.get(param_name, str)
+            annotation = _resolve_parameter_annotation(fn, param)
             if annotation is ExecutionContext:
                 wants_context = True
                 continue
@@ -110,4 +111,22 @@ def _stringify_output(output: ToolOutput) -> str:
         return ""
     if isinstance(output, str):
         return output
-    return repr(output)
+    return json.dumps(output, ensure_ascii=False)
+
+
+def _output_content_type(output: ToolOutput) -> str:
+    if isinstance(output, str):
+        return "text/plain"
+    return "application/json"
+
+
+def _resolve_parameter_annotation(
+    fn: Callable[..., Awaitable[ToolOutput]], param: inspect.Parameter
+) -> object:
+    annotation = param.annotation
+    if annotation is inspect.Parameter.empty:
+        return str
+    if isinstance(annotation, str):
+        globalns = getattr(fn, "__globals__", {})
+        return eval(annotation, globalns)
+    return annotation

@@ -32,7 +32,7 @@ async def test_tool_decorator_builds_schema_and_executes(tmp_path) -> None:
     assert result.ok is True
     assert result.name == "echo"
     assert result.content == "haha"
-    assert result.metadata == {"permission": "read"}
+    assert result.metadata == {"permission": "read", "content_type": "text/plain"}
 
 
 def test_registry_registers_tools_and_exposes_sorted_metadata() -> None:
@@ -83,6 +83,24 @@ async def test_tool_can_receive_execution_context(tmp_path) -> None:
 
     assert result.ok is True
     assert result.content == str(tmp_path)
+
+
+@pytest.mark.anyio
+async def test_structured_tool_output_is_json(tmp_path) -> None:
+    @tool(permission="read")
+    async def metadata() -> dict[str, str | int | bool]:
+        return {"path": "README.md", "line": 1, "truncated": False}
+
+    registry = ToolRegistry([metadata])
+
+    result = await registry.execute(
+        ToolCall(name="metadata"),
+        ExecutionContext(workspace=tmp_path),
+    )
+
+    assert result.ok is True
+    assert result.content == '{"path": "README.md", "line": 1, "truncated": false}'
+    assert result.metadata == {"permission": "read", "content_type": "application/json"}
 
 
 @pytest.mark.anyio

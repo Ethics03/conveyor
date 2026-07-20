@@ -30,4 +30,3 @@ Conveyor is:
 - Tool use should be observable and permissioned.
 - Agent capabilities should grow as modular subsystems.
 
-

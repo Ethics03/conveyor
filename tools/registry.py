@@ -5,7 +5,14 @@ from typing import Any, cast
 
 from agent.models import ToolCall, ToolPermission, ToolResult
 from providers.base import ToolSchema
-from tools.base import ExecutionContext, JsonObject, Tool, ToolOutput, _stringify_output
+from tools.base import (
+    ExecutionContext,
+    JsonObject,
+    Tool,
+    ToolOutput,
+    _output_content_type,
+    _stringify_output,
+)
 
 
 class ToolRegistry:
@@ -65,7 +72,10 @@ def _successful_result(tool_call: ToolCall, tool: Tool, output: ToolOutput) -> T
         name=tool.name,
         ok=True,
         content=_stringify_output(output),
-        metadata={"permission": tool.permission},
+        metadata={
+            "permission": tool.permission,
+            "content_type": _output_content_type(output),
+        },
     )
 
 
