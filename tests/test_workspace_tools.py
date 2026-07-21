@@ -12,6 +12,7 @@ from tools.workspace import (
     relative_workspace_path,
     require_ripgrep,
     resolve_workspace_path,
+    search_files,
 )
 
 
@@ -134,3 +135,105 @@ async def test_read_file_rejects_paths_outside_workspace(tmp_path) -> None:
 
     assert result.ok is False
     assert "Path escapes workspace" in result.content
+
+
+@pytest.mark.anyio
+async def test_search_files_discovers_files_by_name(tmp_path) -> None:
+    if which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+
+    (tmp_path / "agent").mkdir()
+    (tmp_path / "agent" / "models.py").write_text("", encoding="utf-8")
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "workspace.py").write_text("", encoding="utf-8")
+
+    result = await search_files.execute(
+        {"pattern": "models.py"},
+        ExecutionContext(workspace=tmp_path),
+    )
+
+    assert result["files"] == ["agent/models.py"]
+    assert result["target"] == "files"
+    assert result["total_count"] == 1
+    assert result["truncated"] is False
+
+
+@pytest.mark.anyio
+async def test_search_files_supports_path_and_pagination(tmp_path) -> None:
+    if which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.py").write_text("", encoding="utf-8")
+    (src / "b.py").write_text("", encoding="utf-8")
+    (tmp_path / "notes.py").write_text("", encoding="utf-8")
+
+    result = await search_files.execute(
+        {"pattern": "*.py", "path": "src", "limit": 1},
+        ExecutionContext(workspace=tmp_path),
+    )
+
+    assert result["files"] == ["src/a.py"]
+    assert result["total_count"] == 2
+    assert result["truncated"] is True
+
+
+@pytest.mark.anyio
+async def test_search_files_rejects_paths_outside_workspace(tmp_path) -> None:
+    registry = ToolRegistry([search_files])
+    outside = tmp_path.parent / "outside"
+    outside.mkdir(exist_ok=True)
+
+    result = await registry.execute(
+        ToolCall(name="search_files", arguments={"pattern": "*", "path": str(outside)}),
+        ExecutionContext(workspace=tmp_path),
+    )
+
+    assert result.ok is False
+    assert "Path escapes workspace" in result.content
+
+
+@pytest.mark.anyio
+async def test_search_files_finds_content_matches(tmp_path) -> None:
+    if which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "registry.py").write_text(
+        "class ToolRegistry:\n    pass\n",
+        encoding="utf-8",
+    )
+
+    result = await search_files.execute(
+        {"pattern": "ToolRegistry", "target": "content"},
+        ExecutionContext(workspace=tmp_path),
+    )
+
+    assert result["target"] == "content"
+    assert result["matches"] == [
+        {"path": "tools/registry.py", "line": 1, "text": "class ToolRegistry:"}
+    ]
+    assert result["total_count"] == 1
+    assert result["truncated"] is False
+
+
+@pytest.mark.anyio
+async def test_search_files_content_supports_path_and_pagination(tmp_path) -> None:
+    if which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.py").write_text("needle one\n", encoding="utf-8")
+    (src / "b.py").write_text("needle two\n", encoding="utf-8")
+    (tmp_path / "notes.py").write_text("needle ignored\n", encoding="utf-8")
+
+    result = await search_files.execute(
+        {"pattern": "needle", "target": "content", "path": "src", "limit": 1},
+        ExecutionContext(workspace=tmp_path),
+    )
+
+    assert result["matches"] == [{"path": "src/a.py", "line": 1, "text": "needle one"}]
+    assert result["total_count"] == 2
+    assert result["truncated"] is True
