@@ -17,6 +17,9 @@ from tools.base import tool
 DEFAULT_READ_OFFSET = 1
 DEFAULT_READ_LIMIT = 500
 MAX_READ_LIMIT = 2000
+MAX_READ_MANY_FILES = 20
+DEFAULT_READ_MANY_TOTAL_CHARS = 100_000
+MAX_READ_MANY_TOTAL_CHARS = 250_000
 DEFAULT_SEARCH_LIMIT = 50
 MAX_SEARCH_LIMIT = 500
 
@@ -255,15 +258,12 @@ async def search_files(
     raise WorkspaceToolError("target must be 'files' or 'content'")
 
 
-@tool(
-    permission="read",
-    description="Read a UTF-8 text file from the workspace with line pagination.",
-)
-async def read_file(
+def _read_text_file(
+    *,
     path: str,
     context: ExecutionContext,
-    offset: int = DEFAULT_READ_OFFSET,
-    limit: int = DEFAULT_READ_LIMIT,
+    offset: int,
+    limit: int,
 ) -> JsonObject:
     resolved = resolve_workspace_path(context, path)
     if not resolved.is_file():
@@ -288,3 +288,21 @@ async def read_file(
         "total_lines": len(lines),
         "truncated": end < len(lines),
     }
+
+
+@tool(
+    permission="read",
+    description="Read a UTF-8 text file from the workspace with line pagination.",
+)
+async def read_file(
+    path: str,
+    context: ExecutionContext,
+    offset: int = DEFAULT_READ_OFFSET,
+    limit: int = DEFAULT_READ_LIMIT,
+) -> JsonObject:
+    return _read_text_file(
+        path=path,
+        context=context,
+        offset=offset,
+        limit=limit,
+    )
