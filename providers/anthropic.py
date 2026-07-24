@@ -46,23 +46,23 @@ class AnthropicProvider:
 
         response = await client.messages.create(**params)
 
-        for block in response.content:
-            if block.type == "tool_use":
-                return ProviderResponse(
-                    type="tool_call",
-                    tool_call=ToolCall(
-                        id=block.id,
-                        name=block.name,
-                        arguments=dict(block.input),
-                    ),
-                    raw={"provider": self.name, "model": model_name},
-                )
-
-        text = "".join(
+        text = "\n".join(
             block.text for block in response.content if block.type == "text"
         ).strip()
-        return ProviderResponse.message(
-            text, raw={"provider": self.name, "model": model_name}
+        tool_calls = [
+            ToolCall(
+                id=block.id,
+                name=block.name,
+                arguments=dict(block.input),
+            )
+            for block in response.content
+            if block.type == "tool_use"
+        ]
+        return ProviderResponse(
+            content=text,
+            tool_calls=tool_calls,
+            finish_reason=response.stop_reason,
+            raw={"provider": self.name, "model": model_name},
         )
 
 
