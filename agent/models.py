@@ -21,9 +21,6 @@ EventType = Literal[
 ]
 
 ToolPermission = Literal["read", "write", "dangerous"]
-ProviderResponseType = Literal["message", "tool_call"]
-
-
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid7().hex}"
 
@@ -122,16 +119,19 @@ class ProviderMessage:
 
 @dataclass(slots=True)
 class ProviderResponse:
-    type: ProviderResponseType
     content: str = ""
-    tool_call: ToolCall | None = None
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    finish_reason: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def message(
-        cls, content: str, raw: dict[str, Any] | None = None
+        cls,
+        content: str,
+        raw: dict[str, Any] | None = None,
+        finish_reason: str | None = "stop",
     ) -> "ProviderResponse":
-        return cls(type="message", content=content, raw=raw or {})
+        return cls(content=content, finish_reason=finish_reason, raw=raw or {})
 
     @classmethod
     def tool(
@@ -139,9 +139,17 @@ class ProviderResponse:
         name: str,
         arguments: dict[str, Any],
         raw: dict[str, Any] | None = None,
+        *,
+        tool_call_id: str | None = None,
+        content: str = "",
+        finish_reason: str | None = "tool_use",
     ) -> "ProviderResponse":
+        tool_call = ToolCall(name=name, arguments=arguments)
+        if tool_call_id is not None:
+            tool_call.id = tool_call_id
         return cls(
-            type="tool_call",
-            tool_call=ToolCall(name=name, arguments=arguments),
+            content=content,
+            tool_calls=[tool_call],
+            finish_reason=finish_reason,
             raw=raw or {},
         )
