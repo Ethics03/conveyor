@@ -17,18 +17,18 @@ class AnthropicProvider:
     api_key: str | None = None
     name: str = "anthropic"
 
-    async def generate(self, request: ProviderRequest) -> ProviderResponse:
+    def generate(self, request: ProviderRequest) -> ProviderResponse:
         try:
             anthropic_module = import_module("anthropic")
         except ImportError as exc:
             raise RuntimeError("Install Anthropic support with: uv add anthropic") from exc
 
         model_name = request.model or self.model
-        async_anthropic = getattr(anthropic_module, "AsyncAnthropic")
+        anthropic = getattr(anthropic_module, "Anthropic")
         client = (
-            async_anthropic(api_key=self.api_key)
+            anthropic(api_key=self.api_key)
             if self.api_key
-            else async_anthropic()
+            else anthropic()
         )
         params: dict[str, Any] = {
             "model": model_name,
@@ -44,7 +44,7 @@ class AnthropicProvider:
         if tools:
             params["tools"] = tools
 
-        response = await client.messages.create(**params)
+        response = client.messages.create(**params)
 
         text = "\n".join(
             block.text for block in response.content if block.type == "text"

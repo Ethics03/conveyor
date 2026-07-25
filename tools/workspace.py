@@ -190,7 +190,7 @@ def _ripgrep_content(
     permission="read",
     description="Search workspace files by name or content using ripgrep.",
 )
-async def search_files(
+def search_files(
     pattern: str,
     context: ExecutionContext,
     path: str = ".",
@@ -294,7 +294,7 @@ def _read_text_file(
     permission="read",
     description="Read a UTF-8 text file from the workspace with line pagination.",
 )
-async def read_file(
+def read_file(
     path: str,
     context: ExecutionContext,
     offset: int = DEFAULT_READ_OFFSET,
@@ -306,3 +306,81 @@ async def read_file(
         offset=offset,
         limit=limit,
     )
+
+
+@tool(
+    permission="read",
+    description="Read multiple UTF-8 workspace files in one bounded batch.",
+)
+def read_many(
+    paths: list[str],
+    context: ExecutionContext,
+    offset: int = DEFAULT_READ_OFFSET,
+    limit: int = DEFAULT_READ_LIMIT,
+    max_total_chars: int = DEFAULT_READ_MANY_TOTAL_CHARS,
+) -> JsonObject:
+    selected_paths = paths[:MAX_READ_MANY_FILES]
+    normalized_max_chars = max(
+        1,
+        min(int(max_total_chars), MAX_READ_MANY_TOTAL_CHARS),
+    )
+
+    files: list[JsonObject] = []
+    errors: list[JsonObject] = []
+    total_chars = 0
+    budget_truncated = False
+
+    for path in selected_paths:
+        try:
+            result = _read_text_file(
+                path=path,
+                context=context,
+                offset=offset,
+                limit=limit,
+            )
+        except (OSError, UnicodeError, WorkspacePathError) as exc:
+            errors.append({
+                "path": path,
+                "error": str(exc),
+            })
+            continue
+
+        content = result.get("content")
+        if not isinstance(content, str):
+            errors.append({
+                "path": path,
+                "error": "File reader returned invalid content",
+            })
+            continue
+
+        remaining_chars = normalized_max_chars - total_chars
+        if remaining_chars <= 0:
+            break
+
+        if len(content) > remaining_chars:
+            result["content"] = content[:remaining_chars]
+            result["truncated"] = True
+            content = content[:remaining_chars]
+            budget_truncated = True
+
+        files.append(result)
+        total_chars += len(content)
+
+        if total_chars >= normalized_max_chars:
+            break
+
+    processed_count = len(files) + len(errors)
+
+    return {
+        "files": cast(JsonValue, files),
+        "errors": cast(JsonValue, errors),
+        "requested_count": len(paths),
+        "processed_count": processed_count,
+        "total_chars": total_chars,
+        "max_total_chars": normalized_max_chars,
+        "truncated": (
+            budget_truncated
+            or len(paths) > len(selected_paths)
+            or processed_count < len(selected_paths)
+        ),
+    }

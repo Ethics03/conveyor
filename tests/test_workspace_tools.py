@@ -9,6 +9,7 @@ from tools.registry import ToolRegistry
 from tools.workspace import (
     WorkspacePathError,
     read_file,
+    read_many,
     relative_workspace_path,
     require_ripgrep,
     resolve_workspace_path,
@@ -85,12 +86,11 @@ def test_relative_workspace_path_rejects_outside_path(tmp_path) -> None:
         relative_workspace_path(context, outside)
 
 
-@pytest.mark.anyio
-async def test_read_file_returns_numbered_lines_with_metadata(tmp_path) -> None:
+def test_read_file_returns_numbered_lines_with_metadata(tmp_path) -> None:
     path = tmp_path / "notes.txt"
     path.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
 
-    result = await read_file.execute(
+    result = read_file.execute(
         {"path": "notes.txt"},
         ExecutionContext(workspace=tmp_path),
     )
@@ -105,12 +105,11 @@ async def test_read_file_returns_numbered_lines_with_metadata(tmp_path) -> None:
     }
 
 
-@pytest.mark.anyio
-async def test_read_file_supports_line_pagination(tmp_path) -> None:
+def test_read_file_supports_line_pagination(tmp_path) -> None:
     path = tmp_path / "notes.txt"
     path.write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
 
-    result = await read_file.execute(
+    result = read_file.execute(
         {"path": "notes.txt", "offset": 2, "limit": 2},
         ExecutionContext(workspace=tmp_path),
     )
@@ -122,13 +121,12 @@ async def test_read_file_supports_line_pagination(tmp_path) -> None:
     assert result["truncated"] is True
 
 
-@pytest.mark.anyio
-async def test_read_file_rejects_paths_outside_workspace(tmp_path) -> None:
+def test_read_file_rejects_paths_outside_workspace(tmp_path) -> None:
     registry = ToolRegistry([read_file])
     outside = tmp_path.parent / "outside.txt"
     outside.write_text("secret", encoding="utf-8")
 
-    result = await registry.execute(
+    result = registry.execute(
         ToolCall(name="read_file", arguments={"path": str(outside)}),
         ExecutionContext(workspace=tmp_path),
     )
@@ -137,8 +135,73 @@ async def test_read_file_rejects_paths_outside_workspace(tmp_path) -> None:
     assert "Path escapes workspace" in result.content
 
 
-@pytest.mark.anyio
-async def test_search_files_discovers_files_by_name(tmp_path) -> None:
+def test_read_many_returns_multiple_files(tmp_path) -> None:
+    (tmp_path / "a.txt").write_text("alpha\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("beta\n", encoding="utf-8")
+
+    result = read_many.execute(
+        {"paths": ["a.txt", "b.txt"]},
+        ExecutionContext(workspace=tmp_path),
+    )
+
+    assert result["files"] == [
+        {
+            "path": "a.txt",
+            "content": "1|alpha",
+            "offset": 1,
+            "limit": 500,
+            "total_lines": 1,
+            "truncated": False,
+        },
+        {
+            "path": "b.txt",
+            "content": "1|beta",
+            "offset": 1,
+            "limit": 500,
+            "total_lines": 1,
+            "truncated": False,
+        },
+    ]
+    assert result["errors"] == []
+    assert result["processed_count"] == 2
+    assert result["truncated"] is False
+
+
+def test_read_many_preserves_partial_successes(tmp_path) -> None:
+    (tmp_path / "present.txt").write_text("hello\n", encoding="utf-8")
+
+    result = read_many.execute(
+        {"paths": ["missing.txt", "present.txt"]},
+        ExecutionContext(workspace=tmp_path),
+    )
+
+    assert result["files"][0]["path"] == "present.txt"
+    assert result["errors"] == [
+        {
+            "path": "missing.txt",
+            "error": "Not a file: missing.txt",
+        },
+    ]
+    assert result["processed_count"] == 2
+    assert result["truncated"] is False
+
+
+def test_read_many_enforces_total_character_limit(tmp_path) -> None:
+    (tmp_path / "notes.txt").write_text("abcdefghij\n", encoding="utf-8")
+
+    result = read_many.execute(
+        {"paths": ["notes.txt"], "max_total_chars": 5},
+        ExecutionContext(workspace=tmp_path),
+    )
+
+    assert result["files"][0]["content"] == "1|abc"
+    assert result["files"][0]["truncated"] is True
+    assert result["total_chars"] == 5
+    assert result["max_total_chars"] == 5
+    assert result["truncated"] is True
+
+
+def test_search_files_discovers_files_by_name(tmp_path) -> None:
     if which("rg") is None:
         pytest.skip("ripgrep is not installed")
 
@@ -147,7 +210,7 @@ async def test_search_files_discovers_files_by_name(tmp_path) -> None:
     (tmp_path / "tools").mkdir()
     (tmp_path / "tools" / "workspace.py").write_text("", encoding="utf-8")
 
-    result = await search_files.execute(
+    result = search_files.execute(
         {"pattern": "models.py"},
         ExecutionContext(workspace=tmp_path),
     )
@@ -158,8 +221,7 @@ async def test_search_files_discovers_files_by_name(tmp_path) -> None:
     assert result["truncated"] is False
 
 
-@pytest.mark.anyio
-async def test_search_files_supports_path_and_pagination(tmp_path) -> None:
+def test_search_files_supports_path_and_pagination(tmp_path) -> None:
     if which("rg") is None:
         pytest.skip("ripgrep is not installed")
 
@@ -169,7 +231,7 @@ async def test_search_files_supports_path_and_pagination(tmp_path) -> None:
     (src / "b.py").write_text("", encoding="utf-8")
     (tmp_path / "notes.py").write_text("", encoding="utf-8")
 
-    result = await search_files.execute(
+    result = search_files.execute(
         {"pattern": "*.py", "path": "src", "limit": 1},
         ExecutionContext(workspace=tmp_path),
     )
@@ -179,13 +241,12 @@ async def test_search_files_supports_path_and_pagination(tmp_path) -> None:
     assert result["truncated"] is True
 
 
-@pytest.mark.anyio
-async def test_search_files_rejects_paths_outside_workspace(tmp_path) -> None:
+def test_search_files_rejects_paths_outside_workspace(tmp_path) -> None:
     registry = ToolRegistry([search_files])
     outside = tmp_path.parent / "outside"
     outside.mkdir(exist_ok=True)
 
-    result = await registry.execute(
+    result = registry.execute(
         ToolCall(name="search_files", arguments={"pattern": "*", "path": str(outside)}),
         ExecutionContext(workspace=tmp_path),
     )
@@ -194,8 +255,7 @@ async def test_search_files_rejects_paths_outside_workspace(tmp_path) -> None:
     assert "Path escapes workspace" in result.content
 
 
-@pytest.mark.anyio
-async def test_search_files_finds_content_matches(tmp_path) -> None:
+def test_search_files_finds_content_matches(tmp_path) -> None:
     if which("rg") is None:
         pytest.skip("ripgrep is not installed")
 
@@ -205,7 +265,7 @@ async def test_search_files_finds_content_matches(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    result = await search_files.execute(
+    result = search_files.execute(
         {"pattern": "ToolRegistry", "target": "content"},
         ExecutionContext(workspace=tmp_path),
     )
@@ -218,8 +278,7 @@ async def test_search_files_finds_content_matches(tmp_path) -> None:
     assert result["truncated"] is False
 
 
-@pytest.mark.anyio
-async def test_search_files_content_supports_path_and_pagination(tmp_path) -> None:
+def test_search_files_content_supports_path_and_pagination(tmp_path) -> None:
     if which("rg") is None:
         pytest.skip("ripgrep is not installed")
 
@@ -229,7 +288,7 @@ async def test_search_files_content_supports_path_and_pagination(tmp_path) -> No
     (src / "b.py").write_text("needle two\n", encoding="utf-8")
     (tmp_path / "notes.py").write_text("needle ignored\n", encoding="utf-8")
 
-    result = await search_files.execute(
+    result = search_files.execute(
         {"pattern": "needle", "target": "content", "path": "src", "limit": 1},
         ExecutionContext(workspace=tmp_path),
     )

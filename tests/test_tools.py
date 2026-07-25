@@ -7,10 +7,9 @@ from tools.base import ExecutionContext, tool
 from tools.registry import ToolRegistry
 
 
-@pytest.mark.anyio
-async def test_tool_decorator_builds_schema_and_executes(tmp_path) -> None:
+def test_tool_decorator_builds_schema_and_executes(tmp_path) -> None:
     @tool(permission="read", description="Echo a value.")
-    async def echo(value: str, count: int = 1) -> str:
+    def echo(value: str, count: int = 1) -> str:
         return value * count
 
     registry = ToolRegistry()
@@ -24,7 +23,7 @@ async def test_tool_decorator_builds_schema_and_executes(tmp_path) -> None:
     }
     assert echo.schema.parameters["required"] == ["value"]
 
-    result = await registry.execute(
+    result = registry.execute(
         ToolCall(name="echo", arguments={"value": "ha", "count": 2}),
         ExecutionContext(workspace=tmp_path),
     )
@@ -37,11 +36,11 @@ async def test_tool_decorator_builds_schema_and_executes(tmp_path) -> None:
 
 def test_registry_registers_tools_and_exposes_sorted_metadata() -> None:
     @tool(permission="write")
-    async def zebra() -> str:
+    def zebra() -> str:
         return "z"
 
     @tool(permission="read")
-    async def alpha() -> str:
+    def alpha() -> str:
         return "a"
 
     registry = ToolRegistry([zebra])
@@ -54,11 +53,11 @@ def test_registry_registers_tools_and_exposes_sorted_metadata() -> None:
 
 def test_registry_rejects_duplicate_tool_names() -> None:
     @tool(permission="read")
-    async def duplicate() -> str:
+    def duplicate() -> str:
         return "one"
 
     @tool(permission="read", name="duplicate")
-    async def another() -> str:
+    def another() -> str:
         return "two"
 
     registry = ToolRegistry([duplicate])
@@ -67,16 +66,15 @@ def test_registry_rejects_duplicate_tool_names() -> None:
         registry.register(another)
 
 
-@pytest.mark.anyio
-async def test_tool_can_receive_execution_context(tmp_path) -> None:
+def test_tool_can_receive_execution_context(tmp_path) -> None:
     @tool(permission="read")
-    async def current_workspace(context: ExecutionContext) -> str:
+    def current_workspace(context: ExecutionContext) -> str:
         return str(context.workspace)
 
     registry = ToolRegistry()
     registry.register(current_workspace)
 
-    result = await registry.execute(
+    result = registry.execute(
         ToolCall(name="current_workspace"),
         ExecutionContext(workspace=tmp_path),
     )
@@ -85,15 +83,14 @@ async def test_tool_can_receive_execution_context(tmp_path) -> None:
     assert result.content == str(tmp_path)
 
 
-@pytest.mark.anyio
-async def test_structured_tool_output_is_json(tmp_path) -> None:
+def test_structured_tool_output_is_json(tmp_path) -> None:
     @tool(permission="read")
-    async def metadata() -> dict[str, str | int | bool]:
+    def metadata() -> dict[str, str | int | bool]:
         return {"path": "README.md", "line": 1, "truncated": False}
 
     registry = ToolRegistry([metadata])
 
-    result = await registry.execute(
+    result = registry.execute(
         ToolCall(name="metadata"),
         ExecutionContext(workspace=tmp_path),
     )
@@ -103,12 +100,11 @@ async def test_structured_tool_output_is_json(tmp_path) -> None:
     assert result.metadata == {"permission": "read", "content_type": "application/json"}
 
 
-@pytest.mark.anyio
-async def test_unknown_tool_returns_failed_result(tmp_path) -> None:
+def test_unknown_tool_returns_failed_result(tmp_path) -> None:
     registry = ToolRegistry()
     tool_call = ToolCall(name="missing")
 
-    result = await registry.execute(tool_call, ExecutionContext(workspace=tmp_path))
+    result = registry.execute(tool_call, ExecutionContext(workspace=tmp_path))
 
     assert result.ok is False
     assert result.tool_call_id == tool_call.id
@@ -116,16 +112,15 @@ async def test_unknown_tool_returns_failed_result(tmp_path) -> None:
     assert result.content == "Unknown tool: missing"
 
 
-@pytest.mark.anyio
-async def test_tool_exception_returns_failed_result(tmp_path) -> None:
+def test_tool_exception_returns_failed_result(tmp_path) -> None:
     @tool(permission="read")
-    async def explode() -> str:
+    def explode() -> str:
         raise ValueError("bad input")
 
     registry = ToolRegistry()
     registry.register(explode)
 
-    result = await registry.execute(
+    result = registry.execute(
         ToolCall(name="explode"),
         ExecutionContext(workspace=tmp_path),
     )

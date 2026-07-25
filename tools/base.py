@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import NoneType, UnionType
@@ -14,7 +14,7 @@ from providers.base import ToolSchema
 JsonValue = str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
 JsonObject = dict[str, JsonValue]
 ToolOutput = JsonValue
-ToolExecutor = Callable[[JsonObject, "ExecutionContext"], Awaitable[ToolOutput]]
+ToolExecutor = Callable[[JsonObject, "ExecutionContext"], ToolOutput]
 
 
 @dataclass(slots=True)
@@ -63,10 +63,10 @@ def tool(
     permission: ToolPermission,
     name: str | None = None,
     description: str | None = None,
-) -> Callable[[Callable[..., Awaitable[ToolOutput]]], Tool]:
-    def decorator(fn: Callable[..., Awaitable[ToolOutput]]) -> Tool:
-        if not inspect.iscoroutinefunction(fn):
-            raise TypeError(f"Tool function must be async: {fn.__name__}")
+) -> Callable[[Callable[..., object]], Tool]:
+    def decorator(fn: Callable[..., object]) -> Tool:
+        if inspect.iscoroutinefunction(fn):
+            raise TypeError(f"Tool function must be synchronous: {fn.__name__}")
 
         signature = inspect.signature(fn)
         properties: JsonObject = {}
@@ -93,13 +93,11 @@ def tool(
             },
         )
 
-        async def execute(
-            arguments: JsonObject, context: ExecutionContext
-        ) -> ToolOutput:
+        def execute(arguments: JsonObject, context: ExecutionContext) -> ToolOutput:
             kwargs: dict[str, object] = dict(arguments)
             if wants_context:
                 kwargs["context"] = context
-            return await fn(**cast(dict[str, Any], kwargs))
+            return cast(ToolOutput, fn(**cast(dict[str, Any], kwargs)))
 
         return Tool(schema=schema, permission=permission, execute=execute)
 
@@ -121,7 +119,7 @@ def _output_content_type(output: ToolOutput) -> str:
 
 
 def _resolve_parameter_annotation(
-    fn: Callable[..., Awaitable[ToolOutput]], param: inspect.Parameter
+    fn: Callable[..., object], param: inspect.Parameter
 ) -> object:
     annotation = param.annotation
     if annotation is inspect.Parameter.empty:

@@ -22,8 +22,7 @@ def test_provider_response_can_contain_text_and_tool_calls() -> None:
     assert response.tool_calls[0].name == "read_file"
 
 
-@pytest.mark.anyio
-async def test_anthropic_provider_collects_multiple_tool_calls(
+def test_anthropic_provider_collects_multiple_tool_calls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     anthropic_response = SimpleNamespace(
@@ -46,17 +45,17 @@ async def test_anthropic_provider_collects_multiple_tool_calls(
     )
 
     class FakeMessages:
-        async def create(self, **params: object) -> object:
+        def create(self, **params: object) -> object:
             return anthropic_response
 
-    class FakeAsyncAnthropic:
+    class FakeAnthropic:
         def __init__(self, **params: object) -> None:
             self.messages = FakeMessages()
 
-    fake_module = SimpleNamespace(AsyncAnthropic=FakeAsyncAnthropic)
+    fake_module = SimpleNamespace(Anthropic=FakeAnthropic)
     monkeypatch.setattr("providers.anthropic.import_module", lambda name: fake_module)
 
-    response = await AnthropicProvider(api_key="test-key").generate(
+    response = AnthropicProvider(api_key="test-key").generate(
         ProviderRequest(messages=[])
     )
 

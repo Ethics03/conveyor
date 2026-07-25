@@ -12,7 +12,6 @@ limit="${6:-20}"
 cd "$repo_root"
 
 uv run python - "$workspace" "$pattern" "$path" "$target" "$offset" "$limit" <<'PY'
-import asyncio
 import json
 import sys
 from dataclasses import asdict
@@ -24,7 +23,7 @@ from tools.registry import ToolRegistry
 from tools.workspace import search_files
 
 
-async def main() -> None:
+def main() -> None:
     workspace = Path(sys.argv[1])
     pattern = sys.argv[2]
     path = sys.argv[3]
@@ -33,7 +32,7 @@ async def main() -> None:
     limit = int(sys.argv[6])
 
     registry = ToolRegistry([search_files])
-    result = await registry.execute(
+    result = registry.execute(
         ToolCall(
             name="search_files",
             arguments={
@@ -50,5 +49,5 @@ async def main() -> None:
     print(json.dumps(asdict(result), indent=2))
 
 
-asyncio.run(main())
+main()
 PY
