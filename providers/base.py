@@ -27,4 +27,4 @@ class Provider(Protocol):
     name: str
 
     def generate(self, request: ProviderRequest) -> ProviderResponse:
-        pass
+        ...

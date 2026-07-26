@@ -1,4 +1,4 @@
-from providers.anthropic import AnthropicProvider
+from providers.anthropic_provider import AnthropicProvider
 from providers.base import Provider, ProviderRequest, ToolSchema
 from providers.factory import create_provider
 from providers.fake import FakeProvider

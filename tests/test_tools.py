@@ -4,6 +4,7 @@ import pytest
 
 from agent.models import ToolCall
 from tools.base import ExecutionContext, tool
+from tools.defaults import build_default_registry
 from tools.registry import ToolRegistry
 
 
@@ -49,6 +50,16 @@ def test_registry_registers_tools_and_exposes_sorted_metadata() -> None:
     assert registry.names() == ["alpha", "zebra"]
     assert registry.permissions() == {"alpha": "read", "zebra": "write"}
     assert [schema.name for schema in registry.schemas()] == ["alpha", "zebra"]
+
+
+def test_build_default_registry_registers_workspace_tools() -> None:
+    registry = build_default_registry()
+
+    assert registry.names() == [
+        "read_file",
+        "read_many",
+        "search_files",
+    ]
 
 
 def test_registry_rejects_duplicate_tool_names() -> None:

@@ -115,6 +115,8 @@ class ProviderMessage:
     role: MessageRole
     content: str
     name: str | None = None
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    tool_call_id: str | None = None
 
 
 @dataclass(slots=True)
