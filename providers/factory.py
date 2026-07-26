@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from providers.anthropic import DEFAULT_ANTHROPIC_MODEL, AnthropicProvider
+from providers.anthropic_provider import DEFAULT_ANTHROPIC_MODEL, AnthropicProvider
 from providers.base import Provider
 from providers.fake import FakeProvider
 
@@ -19,4 +19,3 @@ def create_provider(
             api_key=api_key,
         )
     raise ValueError(f"Unknown provider: {name}") 
-

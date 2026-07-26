@@ -15,7 +15,7 @@ class FakeProvider:
             responses or [ProviderResponse.message("ok")]
         )
 
-    async def generate(self, request: ProviderRequest) -> ProviderResponse:
+    def generate(self, request: ProviderRequest) -> ProviderResponse:
         if not self._responses:
             return ProviderResponse.message("ok")
 

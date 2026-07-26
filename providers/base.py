@@ -26,5 +26,5 @@ class ProviderRequest:
 class Provider(Protocol):
     name: str
 
-    async def generate(self, request: ProviderRequest) -> ProviderResponse:
-        pass
+    def generate(self, request: ProviderRequest) -> ProviderResponse:
+        ...

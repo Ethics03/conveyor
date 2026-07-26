@@ -41,9 +41,7 @@ class ToolRegistry:
     def schemas(self) -> list[ToolSchema]:
         return [self._tools[name].schema for name in self.names()]
 
-    async def execute(
-        self, tool_call: ToolCall, context: ExecutionContext
-    ) -> ToolResult:
+    def execute(self, tool_call: ToolCall, context: ExecutionContext) -> ToolResult:
         tool = self.get(tool_call.name)
         if tool is None:
             return ToolResult(
@@ -54,7 +52,7 @@ class ToolRegistry:
             )
 
         try:
-            output = await tool.execute(_json_object(tool_call.arguments), context)
+            output = tool.execute(_json_object(tool_call.arguments), context)
         except Exception as exc:
             return ToolResult(
                 tool_call_id=tool_call.id,
