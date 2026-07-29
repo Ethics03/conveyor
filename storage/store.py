@@ -140,8 +140,8 @@ class Store:
         self._conn.execute(
             """
             INSERT INTO messages (id, session_id, role, content, run_id, name,
-                                  metadata, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                  tool_calls, tool_call_id, metadata, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 message.id,
@@ -150,6 +150,15 @@ class Store:
                 message.content,
                 message.run_id,
                 message.name,
+                json.dumps([
+                    {
+                        "id": tool_call.id,
+                        "name": tool_call.name,
+                        "arguments": tool_call.arguments,
+                    }
+                    for tool_call in message.tool_calls
+                ]),
+                message.tool_call_id,
                 json.dumps(message.metadata),
                 _dump_dt(message.created_at),
             ),
@@ -169,6 +178,15 @@ class Store:
                 content=row["content"],
                 run_id=row["run_id"],
                 name=row["name"],
+                tool_calls=[
+                    ToolCall(
+                        id=tool_call["id"],
+                        name=tool_call["name"],
+                        arguments=tool_call["arguments"],
+                    )
+                    for tool_call in json.loads(row["tool_calls"])
+                ],
+                tool_call_id=row["tool_call_id"],
                 metadata=json.loads(row["metadata"]),
                 created_at=_load_dt(row["created_at"]),
             )

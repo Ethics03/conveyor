@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS messages (
     content TEXT NOT NULL,
     run_id TEXT REFERENCES runs(id),
     name TEXT,
+    tool_calls TEXT NOT NULL DEFAULT '[]',
+    tool_call_id TEXT,
     metadata TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL
 );
