@@ -61,6 +61,34 @@ def test_message_ordering_and_metadata(store: Store) -> None:
     assert loaded[0].metadata == {"a": 1}
 
 
+def test_tool_messages_roundtrip(store: Store) -> None:
+    session = Session()
+    store.save_session(session)
+    tool_call = ToolCall(
+        id="call_readme",
+        name="read_file",
+        arguments={"path": "README.md"},
+    )
+    assistant = Message(
+        session_id=session.id,
+        role="assistant",
+        content="I will inspect the file.",
+        tool_calls=[tool_call],
+    )
+    tool_result = Message(
+        session_id=session.id,
+        role="tool",
+        content='{"content": "Conveyor"}',
+        name="read_file",
+        tool_call_id=tool_call.id,
+    )
+
+    store.save_message(assistant)
+    store.save_message(tool_result)
+
+    assert store.list_messages(session.id) == [assistant, tool_result]
+
+
 def test_events_append_and_filter(store: Store) -> None:
     session = Session()
     store.save_session(session)

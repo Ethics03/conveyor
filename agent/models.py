@@ -67,6 +67,8 @@ class Message:
     content: str = ""
     run_id: str | None = None
     name: str | None = None
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    tool_call_id: str | None = None
     created_at: datetime = field(default_factory=utc_now)
     metadata: dict[str, Any] = field(default_factory=dict)
 
