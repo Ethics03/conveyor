@@ -41,6 +41,17 @@ class ToolRegistry:
     def schemas(self) -> list[ToolSchema]:
         return [self._tools[name].schema for name in self.names()]
 
+    def subset(self, names: Iterable[str]) -> ToolRegistry:
+        requested = set(names)
+        missing = sorted(requested - self._tools.keys())
+        if missing:
+            raise ValueError(f"Unknown tools: {', '.join(missing)}")
+
+        return ToolRegistry(
+            self._tools[name]
+            for name in sorted(requested)
+        )
+
     def execute(self, tool_call: ToolCall, context: ExecutionContext) -> ToolResult:
         tool = self.get(tool_call.name)
         if tool is None:
