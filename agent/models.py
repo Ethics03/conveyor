@@ -74,6 +74,13 @@ class Message:
 
 
 @dataclass(slots=True)
+class RunOutcome:
+    run: Run
+    final_message: Message | None
+    iterations: int
+
+
+@dataclass(slots=True)
 class Event:
     id: str = field(default_factory=lambda: new_id("evt"))
     type: EventType = "message.created"
