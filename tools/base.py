@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import NoneType, UnionType
-from typing import Any, cast, get_args, get_origin
+from typing import Any, Literal, cast, get_args, get_origin
 
 from agent.models import ToolPermission
 from providers.base import ToolSchema
@@ -58,6 +58,29 @@ def _json_type(annotation: object) -> str:
     raise TypeError(f"Unsupported parameter type: {annotation}")
 
 
+def _json_schema(annotation: object) -> JsonObject:
+    if isinstance(annotation, UnionType):
+        union_args = cast(tuple[object, ...], get_args(annotation))
+        args = [arg for arg in union_args if arg is not NoneType]
+        if len(args) != 1:
+            raise TypeError(f"Unsupported union type: {annotation}")
+        return _json_schema(args[0])
+
+    origin = cast(object | None, get_origin(annotation))
+    if origin is Literal:
+        literal_args = cast(tuple[object, ...], get_args(annotation))
+        enum_values: list[JsonValue] = []
+        for value in literal_args:
+            if not isinstance(value, str):
+                raise TypeError(f"Unsupported literal type: {annotation}")
+            enum_values.append(value)
+        if not enum_values:
+            raise TypeError(f"Literal must contain at least one value: {annotation}")
+        return {"type": "string", "enum": enum_values}
+
+    return {"type": _json_type(annotation)}
+
+
 def tool(
     *,
     permission: ToolPermission,
@@ -78,7 +101,7 @@ def tool(
             if annotation is ExecutionContext:
                 wants_context = True
                 continue
-            properties[param_name] = {"type": _json_type(annotation)}
+            properties[param_name] = _json_schema(annotation)
             default: object = param.default
             if default is inspect.Parameter.empty:
                 required.append(param_name)
