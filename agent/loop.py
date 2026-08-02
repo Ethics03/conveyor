@@ -294,7 +294,7 @@ def run_agent(
                 messages.append(tool_message)
 
     except Exception as exc:
-        _fail_run(
+        _ = _fail_run(
             run=run,
             error=str(exc),
             iterations=iterations,
