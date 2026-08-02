@@ -52,6 +52,36 @@ def test_registry_registers_tools_and_exposes_sorted_metadata() -> None:
     assert [schema.name for schema in registry.schemas()] == ["alpha", "zebra"]
 
 
+def test_registry_subset_exposes_and_executes_only_requested_tools(tmp_path) -> None:
+    @tool(permission="read")
+    def allowed() -> str:
+        return "allowed"
+
+    @tool(permission="dangerous")
+    def hidden() -> str:
+        return "hidden"
+
+    subset = ToolRegistry([allowed, hidden]).subset(["allowed"])
+
+    assert subset.names() == ["allowed"]
+    assert [schema.name for schema in subset.schemas()] == ["allowed"]
+    assert subset.execute(
+        ToolCall(name="allowed"),
+        ExecutionContext(workspace=tmp_path),
+    ).ok is True
+    assert subset.execute(
+        ToolCall(name="hidden"),
+        ExecutionContext(workspace=tmp_path),
+    ).ok is False
+
+
+def test_registry_subset_rejects_unknown_requested_tools() -> None:
+    registry = ToolRegistry()
+
+    with pytest.raises(ValueError, match="Unknown tools: missing, other"):
+        registry.subset(["other", "missing"])
+
+
 def test_build_default_registry_registers_workspace_tools() -> None:
     registry = build_default_registry()
 

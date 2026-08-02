@@ -14,8 +14,10 @@ class FakeProvider:
         self._responses: deque[ProviderResponse | str] = deque(
             responses or [ProviderResponse.message("ok")]
         )
+        self.requests: list[ProviderRequest] = []
 
     def generate(self, request: ProviderRequest) -> ProviderResponse:
+        self.requests.append(request)
         if not self._responses:
             return ProviderResponse.message("ok")
 
