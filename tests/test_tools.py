@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 import pytest
 
 from agent.models import ToolCall
@@ -33,6 +35,17 @@ def test_tool_decorator_builds_schema_and_executes(tmp_path) -> None:
     assert result.name == "echo"
     assert result.content == "haha"
     assert result.metadata == {"permission": "read", "content_type": "text/plain"}
+
+
+def test_tool_decorator_builds_string_literal_enum() -> None:
+    @tool(permission="read")
+    def select_target(target: Literal["files", "content"] = "files") -> str:
+        return target
+
+    assert select_target.schema.parameters["properties"]["target"] == {
+        "type": "string",
+        "enum": ["files", "content"],
+    }
 
 
 def test_registry_registers_tools_and_exposes_sorted_metadata() -> None:

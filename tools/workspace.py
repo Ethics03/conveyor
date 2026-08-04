@@ -6,7 +6,7 @@ import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 from shutil import which
-from typing import cast
+from typing import Literal, cast
 
 from tools.base import ExecutionContext
 from tools.base import JsonObject
@@ -194,7 +194,7 @@ def search_files(
     pattern: str,
     context: ExecutionContext,
     path: str = ".",
-    target: str = "files",
+    target: Literal["files", "content"] = "files",
     offset: int = 0,
     limit: int = DEFAULT_SEARCH_LIMIT,
 ) -> JsonObject:
