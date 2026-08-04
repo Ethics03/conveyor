@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from agent.approvals import ApprovalPolicy, PolicyDecision, ToolCallDecision
 from agent.context import build_provider_messages
 from agent.models import (
     Agent,
@@ -96,6 +97,40 @@ def _save_assistant_message(
         )
     )
     return message
+
+
+def _preflight_tool_calls(
+    *,
+    tool_calls: list[ToolCall],
+    registry: ToolRegistry,
+    context: ExecutionContext,
+    policy: ApprovalPolicy,
+) -> list[ToolCallDecision]:
+    decisions: list[ToolCallDecision] = []
+
+    for tool_call in tool_calls:
+        tool = registry.get(tool_call.name)
+
+        if tool is None:
+            decision = PolicyDecision(
+                action="deny",
+                reason=f"Unknown tool: {tool_call.name}",
+            )
+        else:
+            decision = policy.evaluate(
+                tool=tool,
+                tool_call=tool_call,
+                context=context,
+            )
+
+        decisions.append(
+            ToolCallDecision(
+                tool_call=tool_call,
+                decision=decision,
+            )
+        )
+
+    return decisions
 
 
 def _execute_tool_call(

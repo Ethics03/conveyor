@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from agent.loop import run_agent
-from agent.models import Agent, Message, ProviderResponse, Session
+from agent.approvals import DefaultApprovalPolicy
+from agent.loop import _preflight_tool_calls, run_agent
+from agent.models import Agent, Message, ProviderResponse, Session, ToolCall
 from providers.base import ProviderRequest
 from providers.fake import FakeProvider
 from storage.store import Store
@@ -22,6 +23,43 @@ def _session_with_user_message(store: Store) -> Session:
         )
     )
     return session
+
+
+def test_preflight_tool_calls_preserves_batch_order(tmp_path) -> None:
+    @tool(permission="read")
+    def inspect_workspace() -> str:
+        return ""
+
+    @tool(permission="write")
+    def update_workspace() -> str:
+        return ""
+
+    tool_calls = [
+        ToolCall(id="call_read", name="inspect_workspace"),
+        ToolCall(id="call_write", name="update_workspace"),
+    ]
+
+    decisions = _preflight_tool_calls(
+        tool_calls=tool_calls,
+        registry=ToolRegistry([inspect_workspace, update_workspace]),
+        context=ExecutionContext(workspace=tmp_path),
+        policy=DefaultApprovalPolicy(),
+    )
+
+    assert [item.tool_call.id for item in decisions] == ["call_read", "call_write"]
+    assert [item.decision.action for item in decisions] == ["allow", "ask"]
+
+
+def test_preflight_tool_calls_denies_unknown_tool(tmp_path) -> None:
+    decisions = _preflight_tool_calls(
+        tool_calls=[ToolCall(name="missing")],
+        registry=ToolRegistry(),
+        context=ExecutionContext(workspace=tmp_path),
+        policy=DefaultApprovalPolicy(),
+    )
+
+    assert decisions[0].decision.action == "deny"
+    assert decisions[0].decision.reason == "Unknown tool: missing"
 
 
 def test_run_agent_finishes_with_plain_response(tmp_path) -> None:
