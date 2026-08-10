@@ -55,9 +55,9 @@ CREATE TABLE IF NOT EXISTS approvals (
     id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL REFERENCES sessions(id),
     run_id TEXT NOT NULL REFERENCES runs(id),
-    tool_call TEXT,
+    tool_call TEXT NOT NULL,
     reason TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'denied')),
     created_at TEXT NOT NULL,
     resolved_at TEXT
 );

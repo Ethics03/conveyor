@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
+import pytest
+
 from agent.context import build_provider_messages
-from agent.models import Agent, Message, ProviderMessage, ToolCall
+from agent.models import Agent, Message, ProviderMessage, Run, Session, ToolCall
 
 
 def test_build_provider_messages_prepends_agent_instructions() -> None:
@@ -24,6 +28,40 @@ def test_build_provider_messages_omits_empty_instructions() -> None:
     assert build_provider_messages(Agent(), messages) == [
         ProviderMessage(role="user", content="Hello"),
     ]
+
+
+def test_build_provider_messages_includes_temporal_context() -> None:
+    session = Session(
+        created_at=datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc),
+    )
+    run = Run(
+        session_id=session.id,
+        created_at=datetime(2026, 8, 10, 8, 5, tzinfo=timezone.utc),
+    )
+
+    provider_messages = build_provider_messages(
+        Agent(),
+        [Message(role="user", content="What happened?")],
+        session=session,
+        run=run,
+    )
+
+    assert provider_messages == [
+        ProviderMessage(
+            role="system",
+            content=(
+                "Temporal context (UTC):\n"
+                "- Session created at: 2026-08-10T08:00:00+00:00\n"
+                "- Current run started at: 2026-08-10T08:05:00+00:00"
+            ),
+        ),
+        ProviderMessage(role="user", content="What happened?"),
+    ]
+
+
+def test_build_provider_messages_rejects_partial_temporal_context() -> None:
+    with pytest.raises(ValueError, match="must be provided together"):
+        _ = build_provider_messages(Agent(), [], session=Session())
 
 
 def test_build_provider_messages_preserves_tool_call_relationships() -> None:

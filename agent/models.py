@@ -13,14 +13,20 @@ EventType = Literal[
     "session.created",
     "message.created",
     "run.started",
+    "run.blocked",
+    "run.resumed",
     "run.finished",
     "tool.started",
     "approval.requested",
+    "approval.resolved",
     "tool.finished",
     "run.failed",
 ]
-
+ApprovalStatus = Literal["pending", "approved", "denied"]
+ApprovalDecision = Literal["approved", "denied"]
 ToolPermission = Literal["read", "write", "dangerous"]
+
+
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid7().hex}"
 
@@ -109,12 +115,12 @@ class ToolResult:
 
 @dataclass(slots=True)
 class ApprovalRequest:
-    id: str = field(default_factory=lambda: new_id("appr"))
-    session_id: str = ""
-    run_id: str = ""
-    tool_call: ToolCall | None = None
+    session_id: str
+    run_id: str
+    tool_call: ToolCall
     reason: str = ""
-    status: Literal["pending", "approved", "denied"] = "pending"
+    id: str = field(default_factory=lambda: new_id("appr"))
+    status: ApprovalStatus = "pending"
     created_at: datetime = field(default_factory=utc_now)
     resolved_at: datetime | None = None
 
