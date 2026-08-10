@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from agent.models import ToolCall
+from agent.models import ApprovalDecision, ApprovalRequest, ToolCall
 from tools.base import ExecutionContext, Tool
 
 
@@ -30,6 +30,11 @@ class ApprovalPolicy(Protocol):
         tool_call: ToolCall,
         context: ExecutionContext,
     ) -> PolicyDecision: ...
+
+
+class ApprovalCallback(Protocol):
+    def __call__(self, approval: ApprovalRequest, /) -> ApprovalDecision: ...
+
 
 class DefaultApprovalPolicy:
     def evaluate(

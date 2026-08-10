@@ -1,9 +1,16 @@
 from __future__ import annotations
 
-from agent.approvals import ApprovalPolicy, PolicyDecision, ToolCallDecision
+from agent.approvals import (
+    ApprovalCallback,
+    ApprovalPolicy,
+    DefaultApprovalPolicy,
+    PolicyDecision,
+    ToolCallDecision,
+)
 from agent.context import build_provider_messages
 from agent.models import (
     Agent,
+    ApprovalRequest,
     Event,
     Message,
     ProviderResponse,
@@ -53,11 +60,18 @@ def _start_run(
 def _build_provider_request(
     *,
     agent: Agent,
+    session: Session,
+    run: Run,
     messages: list[Message],
     registry: ToolRegistry,
 ) -> ProviderRequest:
     return ProviderRequest(
-        messages=build_provider_messages(agent, messages),
+        messages=build_provider_messages(
+            agent,
+            messages,
+            session=session,
+            run=run,
+        ),
         tools=registry.schemas(),
         model=agent.model,
     )
@@ -131,6 +145,162 @@ def _preflight_tool_calls(
         )
 
     return decisions
+
+
+def _block_run(
+    *,
+    run: Run,
+    final_message: Message,
+    decisions: list[ToolCallDecision],
+    iterations: int,
+    store: Store,
+) -> list[ApprovalRequest]:
+    approvals = [
+        ApprovalRequest(
+            session_id=run.session_id,
+            run_id=run.id,
+            tool_call=item.tool_call,
+            reason=item.decision.reason,
+        )
+        for item in decisions
+        if item.decision.action == "ask"
+    ]
+    if not approvals:
+        raise ValueError("Cannot block a run without pending approvals")
+
+    run.status = "blocked"
+    run.error = None
+    run.updated_at = utc_now()
+
+    events: list[Event] = []
+    for approval in approvals:
+        tool_call = approval.tool_call
+        events.append(
+            Event(
+                type="approval.requested",
+                session_id=run.session_id,
+                run_id=run.id,
+                message_id=final_message.id,
+                payload={
+                    "approval_id": approval.id,
+                    "tool_call_id": tool_call.id,
+                    "name": tool_call.name,
+                    "reason": approval.reason,
+                },
+            )
+        )
+
+    events.append(
+        Event(
+            type="run.blocked",
+            session_id=run.session_id,
+            run_id=run.id,
+            message_id=final_message.id,
+            payload={
+                "approval_ids": [approval.id for approval in approvals],
+                "approval_count": len(approvals),
+                "iterations": iterations,
+            },
+        )
+    )
+    store.block_run(run=run, approvals=approvals, events=events)
+    return approvals
+
+
+def _request_approvals(
+    *,
+    run: Run,
+    final_message: Message,
+    decisions: list[ToolCallDecision],
+    iterations: int,
+    store: Store,
+    callback: ApprovalCallback | None,
+) -> dict[str, ApprovalRequest]:
+    approvals = _block_run(
+        run=run,
+        final_message=final_message,
+        decisions=decisions,
+        iterations=iterations,
+        store=store,
+    )
+    resolved: list[ApprovalRequest] = []
+    try:
+        for approval in approvals:
+            choice = callback(approval) if callback is not None else "denied"
+            resolved.append(store.resolve_approval(approval.id, choice))
+    except Exception:
+        resolved_ids = {approval.id for approval in resolved}
+        for approval in approvals:
+            if approval.id not in resolved_ids:
+                _ = store.resolve_approval(approval.id, "denied")
+        raise
+
+    run.status = "running"
+    run.error = None
+    run.updated_at = utc_now()
+    store.resume_run(
+        run=run,
+        event=Event(
+            type="run.resumed",
+            session_id=run.session_id,
+            run_id=run.id,
+            message_id=final_message.id,
+            payload={
+                "approval_ids": [approval.id for approval in resolved],
+                "decisions": [approval.status for approval in resolved],
+                "iterations": iterations,
+            },
+        ),
+    )
+
+    return {approval.tool_call.id: approval for approval in resolved}
+
+
+def _deny_tool_call(
+    *,
+    decision: ToolCallDecision,
+    session: Session,
+    run: Run,
+    store: Store,
+    approval: ApprovalRequest | None = None,
+    denial_reason: str | None = None,
+) -> Message:
+    content = decision.decision.reason or "Tool call denied by policy"
+    metadata: dict[str, object] = {
+        "ok": False,
+        "policy_action": "deny",
+    }
+    if approval is not None:
+        content = denial_reason or "Tool call denied by user"
+        metadata["approval_id"] = approval.id
+        metadata["approval_status"] = approval.status
+
+    message = Message(
+        session_id=session.id,
+        run_id=run.id,
+        role="tool",
+        content=content,
+        name=decision.tool_call.name,
+        tool_call_id=decision.tool_call.id,
+        metadata=metadata,
+    )
+
+    store.save_message(message)
+    store.append_event(
+        Event(
+            type="message.created",
+            session_id=session.id,
+            run_id=run.id,
+            message_id=message.id,
+            payload={
+                "role": message.role,
+                "name": message.name,
+                "ok": False,
+                "policy_action": "deny",
+            },
+        )
+    )
+    return message
 
 
 def _execute_tool_call(
@@ -271,6 +441,8 @@ def run_agent(
     registry: ToolRegistry,
     context: ExecutionContext,
     store: Store,
+    policy: ApprovalPolicy | None = None,
+    approval_callback: ApprovalCallback | None = None,
     parent_run_id: str | None = None,
     max_iterations: int = MAX_ITERATIONS,
 ) -> RunOutcome:
@@ -282,6 +454,7 @@ def run_agent(
     if not messages:
         raise ValueError("Cannot run an agent without session messages")
 
+    approval_policy = policy if policy is not None else DefaultApprovalPolicy()
     run = _start_run(
         agent=agent,
         session=session,
@@ -296,6 +469,8 @@ def run_agent(
         for iterations in range(1, max_iterations + 1):
             request = _build_provider_request(
                 agent=agent,
+                session=session,
+                run=run,
                 messages=messages,
                 registry=allowed_registry,
             )
@@ -317,15 +492,53 @@ def run_agent(
                     store=store,
                 )
 
-            for tool_call in final_message.tool_calls:
-                tool_message = _execute_tool_call(
-                    tool_call=tool_call,
-                    session=session,
+            decisions = _preflight_tool_calls(
+                tool_calls=final_message.tool_calls,
+                registry=allowed_registry,
+                context=context,
+                policy=approval_policy,
+            )
+            approvals_by_tool_call: dict[str, ApprovalRequest] = {}
+            if any(item.decision.action == "ask" for item in decisions):
+                approvals_by_tool_call = _request_approvals(
                     run=run,
-                    registry=allowed_registry,
-                    context=context,
+                    final_message=final_message,
+                    decisions=decisions,
+                    iterations=iterations,
                     store=store,
+                    callback=approval_callback,
                 )
+
+            for decision in decisions:
+                approval = approvals_by_tool_call.get(decision.tool_call.id)
+                if decision.decision.action == "deny" or (
+                    approval is not None and approval.status == "denied"
+                ):
+                    tool_message = _deny_tool_call(
+                        decision=decision,
+                        session=session,
+                        run=run,
+                        store=store,
+                        approval=approval,
+                        denial_reason=(
+                            "Tool call denied because no approval callback is configured"
+                            if approval is not None and approval_callback is None
+                            else None
+                        ),
+                    )
+                elif decision.decision.action == "allow" or (
+                    approval is not None and approval.status == "approved"
+                ):
+                    tool_message = _execute_tool_call(
+                        tool_call=decision.tool_call,
+                        session=session,
+                        run=run,
+                        registry=allowed_registry,
+                        context=context,
+                        store=store,
+                    )
+                else:
+                    raise RuntimeError("Unresolved approval reached tool execution")
                 messages.append(tool_message)
 
     except Exception as exc:

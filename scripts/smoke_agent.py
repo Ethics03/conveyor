@@ -7,7 +7,14 @@ from dataclasses import asdict
 from pathlib import Path
 
 from agent.loop import run_agent
-from agent.models import Agent, Event, Message, Session
+from agent.models import (
+    Agent,
+    ApprovalDecision,
+    ApprovalRequest,
+    Event,
+    Message,
+    Session,
+)
 from providers.anthropic_provider import AnthropicProvider
 from storage.store import Store
 from tools.base import ExecutionContext
@@ -25,6 +32,24 @@ class ConsoleStore(Store):
             name = event.payload.get("name", "unknown")
             status = "ok" if event.payload.get("ok") else "failed"
             print(f"tool> finished {name} ({status})")
+
+
+def prompt_for_approval(approval: ApprovalRequest) -> ApprovalDecision:
+    arguments = json.dumps(approval.tool_call.arguments, indent=2)
+    print(f"\napproval> {approval.tool_call.name}")
+    print(f"reason> {approval.reason}")
+    print(arguments)
+
+    while True:
+        try:
+            answer = input("allow this tool call? [y/N] ").strip().lower()
+        except EOFError:
+            return "denied"
+        if answer in {"y", "yes", "approve"}:
+            return "approved"
+        if answer in {"", "n", "no", "deny"}:
+            return "denied"
+        print("answer with y or n")
 
 
 def save_user_message(store: Store, session: Session, content: str) -> None:
@@ -115,6 +140,7 @@ def main() -> None:
                     registry=registry,
                     context=context,
                     store=store,
+                    approval_callback=prompt_for_approval,
                 )
             except Exception as exc:
                 print(f"error> {exc}")
