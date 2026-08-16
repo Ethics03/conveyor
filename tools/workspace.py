@@ -384,3 +384,27 @@ def read_many(
             or processed_count < len(selected_paths)
         ),
     }
+
+
+@tool(
+    permission="write",
+    description="Create or replace a UTF-8 text file inside the workspace.",
+)
+def write_file(
+    path: str,
+    content: str,
+    context: ExecutionContext,
+) -> JsonObject:
+    resolved = resolve_workspace_path(context, path)
+    if resolved.exists() and not resolved.is_file():
+        raise WorkspacePathError(f"Not a file: {path}")
+
+    created = not resolved.exists()
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.write_text(content, encoding="utf-8")
+
+    return {
+        "path": relative_workspace_path(context, resolved),
+        "created": created,
+        "bytes_written": len(content.encode("utf-8")),
+    }
