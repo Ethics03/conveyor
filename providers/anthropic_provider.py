@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from anthropic import Anthropic, omit
 from anthropic.types import (
@@ -22,19 +22,25 @@ DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-5"
 @dataclass(slots=True)
 class AnthropicProvider:
     model: str = DEFAULT_ANTHROPIC_MODEL
-    api_key: str | None = None
+    api_key: str | None = field(default=None, repr=False)
     name: str = "anthropic"
+    _client: Anthropic = field(init=False, repr=False, compare=False)
 
-    def generate(self, request: ProviderRequest) -> ProviderResponse:
-        model_name = request.model or self.model
-        client = (
+    def __post_init__(self) -> None:
+        self._client = (
             Anthropic(api_key=self.api_key)
             if self.api_key
             else Anthropic()
         )
+
+    def close(self) -> None:
+        self._client.close()
+
+    def generate(self, request: ProviderRequest) -> ProviderResponse:
+        model_name = request.model or self.model
         system = _system_instructions(request.messages)
         tools = _anthropic_tools(request)
-        response = client.messages.create(
+        response = self._client.messages.create(
             model=model_name,
             max_tokens=request.max_tokens or 4096,
             messages=_anthropic_messages(request.messages),
@@ -65,7 +71,15 @@ class AnthropicProvider:
             content="\n".join(text_parts).strip(),
             tool_calls=tool_calls,
             finish_reason=response.stop_reason,
-            raw={"provider": self.name, "model": model_name},
+            raw={
+                "provider": self.name,
+                "model": response.model,
+                "response_id": response.id,
+                "usage": response.usage.model_dump(
+                    mode="json",
+                    exclude_none=True,
+                ),
+            },
         )
 
 

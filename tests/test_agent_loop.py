@@ -25,6 +25,7 @@ from providers.fake import FakeProvider
 from storage.store import Store
 from tools.base import ExecutionContext, tool
 from tools.registry import ToolRegistry
+from tools.workspace import write_file
 
 
 def _session_with_user_message(store: Store) -> Session:
@@ -321,6 +322,36 @@ def test_run_agent_waits_for_approval_and_continues(tmp_path) -> None:
         "message.created",
         "run.finished",
     ]
+
+
+def test_run_agent_approves_workspace_write_before_mutation(tmp_path) -> None:
+    store = Store(":memory:")
+    session = _session_with_user_message(store)
+    provider = FakeProvider([
+        ProviderResponse.tool(
+            "write_file",
+            {"path": "result.txt", "content": "approved\n"},
+            tool_call_id="call_write_file",
+        ),
+        ProviderResponse.message("File written."),
+    ])
+
+    def approve(_: ApprovalRequest) -> ApprovalDecision:
+        assert (tmp_path / "result.txt").exists() is False
+        return "approved"
+
+    outcome = run_agent(
+        agent=Agent(tools=["write_file"]),
+        session=session,
+        provider=provider,
+        registry=ToolRegistry([write_file]),
+        context=ExecutionContext(workspace=tmp_path),
+        store=store,
+        approval_callback=approve,
+    )
+
+    assert outcome.run.status == "finished"
+    assert (tmp_path / "result.txt").read_text(encoding="utf-8") == "approved\n"
 
 
 def test_run_agent_returns_user_denial_to_provider(tmp_path) -> None:

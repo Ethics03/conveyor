@@ -102,7 +102,9 @@ def test_build_default_registry_registers_workspace_tools() -> None:
         "read_file",
         "read_many",
         "search_files",
+        "write_file",
     ]
+    assert registry.permissions()["write_file"] == "write"
 
 
 def test_registry_rejects_duplicate_tool_names() -> None:

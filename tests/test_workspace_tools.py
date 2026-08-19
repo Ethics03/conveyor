@@ -14,6 +14,7 @@ from tools.workspace import (
     require_ripgrep,
     resolve_workspace_path,
     search_files,
+    write_file,
 )
 
 
@@ -199,6 +200,72 @@ def test_read_many_enforces_total_character_limit(tmp_path) -> None:
     assert result["total_chars"] == 5
     assert result["max_total_chars"] == 5
     assert result["truncated"] is True
+
+
+def test_write_file_creates_utf8_file_and_parent_directories(tmp_path) -> None:
+    result = write_file.execute(
+        {"path": "notes/today.txt", "content": "hello, world\n"},
+        ExecutionContext(workspace=tmp_path),
+    )
+
+    assert result == {
+        "path": "notes/today.txt",
+        "created": True,
+        "bytes_written": 13,
+    }
+    assert (tmp_path / "notes" / "today.txt").read_text(encoding="utf-8") == (
+        "hello, world\n"
+    )
+
+
+def test_write_file_replaces_existing_file(tmp_path) -> None:
+    path = tmp_path / "notes.txt"
+    path.write_text("old content", encoding="utf-8")
+
+    result = write_file.execute(
+        {"path": "notes.txt", "content": "new content"},
+        ExecutionContext(workspace=tmp_path),
+    )
+
+    assert result["created"] is False
+    assert result["bytes_written"] == 11
+    assert path.read_text(encoding="utf-8") == "new content"
+
+
+def test_write_file_rejects_paths_outside_workspace(tmp_path) -> None:
+    registry = ToolRegistry([write_file])
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.txt"
+
+    result = registry.execute(
+        ToolCall(
+            name="write_file",
+            arguments={"path": str(outside), "content": "blocked"},
+        ),
+        ExecutionContext(workspace=tmp_path),
+    )
+
+    assert result.ok is False
+    assert "Path escapes workspace" in result.content
+    assert outside.exists() is False
+
+
+def test_write_file_rejects_symlink_escape(tmp_path) -> None:
+    registry = ToolRegistry([write_file])
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    (tmp_path / "link").symlink_to(outside, target_is_directory=True)
+
+    result = registry.execute(
+        ToolCall(
+            name="write_file",
+            arguments={"path": "link/escaped.txt", "content": "blocked"},
+        ),
+        ExecutionContext(workspace=tmp_path),
+    )
+
+    assert result.ok is False
+    assert "Path escapes workspace" in result.content
+    assert (outside / "escaped.txt").exists() is False
 
 
 def test_search_files_discovers_files_by_name(tmp_path) -> None:
