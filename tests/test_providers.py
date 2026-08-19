@@ -1,10 +1,21 @@
 from types import SimpleNamespace
 
 import pytest
+from anthropic.types import Usage
 
 from agent.models import ProviderMessage, ProviderResponse, ToolCall
 from providers.anthropic_provider import AnthropicProvider, _anthropic_messages
 from providers.base import ProviderRequest
+
+
+def test_anthropic_provider_repr_redacts_api_key() -> None:
+    provider = AnthropicProvider(api_key="secret-api-key")
+
+    representation = repr(provider)
+    provider.close()
+
+    assert "secret-api-key" not in representation
+    assert "api_key" not in representation
 
 
 def test_provider_response_can_contain_text_and_tool_calls() -> None:
@@ -110,6 +121,8 @@ def test_anthropic_provider_collects_multiple_tool_calls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     anthropic_response = SimpleNamespace(
+        id="msg_test",
+        model="claude-sonnet-4-5",
         content=[
             SimpleNamespace(type="text", text="I will inspect both files."),
             SimpleNamespace(
@@ -126,6 +139,12 @@ def test_anthropic_provider_collects_multiple_tool_calls(
             ),
         ],
         stop_reason="tool_use",
+        usage=Usage(
+            input_tokens=120,
+            output_tokens=30,
+            cache_creation_input_tokens=20,
+            cache_read_input_tokens=80,
+        ),
     )
 
     class FakeMessages:
@@ -152,3 +171,57 @@ def test_anthropic_provider_collects_multiple_tool_calls(
         {"path": "README.md"},
         {"path": "pyproject.toml"},
     ]
+    assert response.raw == {
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-5",
+        "response_id": "msg_test",
+        "usage": {
+            "cache_creation_input_tokens": 20,
+            "cache_read_input_tokens": 80,
+            "input_tokens": 120,
+            "output_tokens": 30,
+        },
+    }
+
+
+def test_anthropic_provider_reuses_and_closes_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clients_created = 0
+    requests_created = 0
+    client_closed = False
+    anthropic_response = SimpleNamespace(
+        id="msg_test",
+        model="claude-sonnet-4-5",
+        content=[SimpleNamespace(type="text", text="Done.")],
+        stop_reason="end_turn",
+        usage=Usage(input_tokens=10, output_tokens=2),
+    )
+
+    class FakeMessages:
+        def create(self, **params: object) -> object:
+            nonlocal requests_created
+            requests_created += 1
+            return anthropic_response
+
+    class FakeAnthropic:
+        def __init__(self, **params: object) -> None:
+            nonlocal clients_created
+            clients_created += 1
+            self.messages = FakeMessages()
+
+        def close(self) -> None:
+            nonlocal client_closed
+            client_closed = True
+
+    monkeypatch.setattr("providers.anthropic_provider.Anthropic", FakeAnthropic)
+
+    provider = AnthropicProvider(api_key="test-key")
+    request = ProviderRequest(messages=[])
+    provider.generate(request)
+    provider.generate(request)
+    provider.close()
+
+    assert clients_created == 1
+    assert requests_created == 2
+    assert client_closed is True
