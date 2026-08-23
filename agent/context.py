@@ -10,6 +10,10 @@ def _to_provider_message(message: Message) -> ProviderMessage:
         name=message.name,
         tool_calls=list(message.tool_calls),
         tool_call_id=message.tool_call_id,
+        is_error=(
+            message.role == "tool"
+            and message.metadata.get("ok") is False
+        ),
     )
 
 

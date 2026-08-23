@@ -117,6 +117,31 @@ def test_anthropic_tool_result_requires_tool_call_id() -> None:
         ])
 
 
+def test_anthropic_messages_mark_failed_tool_results() -> None:
+    converted = _anthropic_messages([
+        ProviderMessage(
+            role="tool",
+            content="Tool execution failed",
+            tool_call_id="call_failed",
+            is_error=True,
+        )
+    ])
+
+    assert converted == [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call_failed",
+                    "content": "Tool execution failed",
+                    "is_error": True,
+                }
+            ],
+        }
+    ]
+
+
 def test_anthropic_provider_collects_multiple_tool_calls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

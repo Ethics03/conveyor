@@ -94,11 +94,14 @@ def _anthropic_messages(messages: list[ProviderMessage]) -> list[MessageParam]:
         if message.role == "tool":
             if message.tool_call_id is None:
                 raise ValueError("Tool result message requires tool_call_id")
-            pending_tool_results.append({
+            tool_result: ToolResultBlockParam = {
                 "type": "tool_result",
                 "tool_use_id": message.tool_call_id,
                 "content": message.content,
-            })
+            }
+            if message.is_error:
+                tool_result["is_error"] = True
+            pending_tool_results.append(tool_result)
             continue
 
         if pending_tool_results:
