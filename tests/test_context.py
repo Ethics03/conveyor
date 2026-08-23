@@ -101,3 +101,26 @@ def test_build_provider_messages_preserves_tool_call_relationships() -> None:
         ),
     ]
     assert provider_messages[0].tool_calls is not assistant.tool_calls
+
+
+def test_build_provider_messages_marks_failed_tool_results() -> None:
+    provider_messages = build_provider_messages(
+        Agent(),
+        [
+            Message(
+                role="tool",
+                content="Tool execution failed",
+                tool_call_id="call_failed",
+                metadata={"ok": False},
+            )
+        ],
+    )
+
+    assert provider_messages == [
+        ProviderMessage(
+            role="tool",
+            content="Tool execution failed",
+            tool_call_id="call_failed",
+            is_error=True,
+        )
+    ]
