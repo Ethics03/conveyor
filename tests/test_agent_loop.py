@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+from threading import Event as ThreadEvent
 
 import pytest
 
@@ -214,14 +216,16 @@ def test_run_agent_executes_tool_and_continues(tmp_path) -> None:
 
     store = Store(":memory:")
     session = _session_with_user_message(store)
-    provider = FakeProvider([
-        ProviderResponse.tool(
-            "echo",
-            {"value": "hello"},
-            tool_call_id="call_echo",
-        ),
-        ProviderResponse.message("Tool complete."),
-    ])
+    provider = FakeProvider(
+        [
+            ProviderResponse.tool(
+                "echo",
+                {"value": "hello"},
+                tool_call_id="call_echo",
+            ),
+            ProviderResponse.message("Tool complete."),
+        ]
+    )
 
     outcome = run_agent(
         agent=Agent(tools=["echo"]),
@@ -247,6 +251,194 @@ def test_run_agent_executes_tool_and_continues(tmp_path) -> None:
     assert provider.requests[1].messages[-1].tool_call_id == "call_echo"
 
 
+def test_run_agent_executes_parallel_safe_tools_concurrently_in_call_order(
+    tmp_path,
+) -> None:
+    first_started = ThreadEvent()
+    second_started = ThreadEvent()
+    release_first = ThreadEvent()
+
+    @tool(permission="read", parallel_safe=True)
+    def first() -> str:
+        first_started.set()
+        if not second_started.wait(timeout=1):
+            raise RuntimeError("second tool did not start concurrently")
+        if not release_first.wait(timeout=1):
+            raise RuntimeError("first tool was not released")
+        return "first"
+
+    @tool(permission="read", parallel_safe=True)
+    def second() -> str:
+        second_started.set()
+        if not first_started.wait(timeout=1):
+            raise RuntimeError("first tool did not start concurrently")
+        release_first.set()
+        return "second"
+
+    store = Store(":memory:")
+    session = _session_with_user_message(store)
+    provider = FakeProvider(
+        [
+            ProviderResponse(
+                tool_calls=[
+                    ToolCall(id="call_first", name="first"),
+                    ToolCall(id="call_second", name="second"),
+                ]
+            ),
+            ProviderResponse.message("Both reads complete."),
+        ]
+    )
+
+    outcome = run_agent(
+        agent=Agent(tools=["first", "second"]),
+        session=session,
+        provider=provider,
+        registry=ToolRegistry([first, second]),
+        context=ExecutionContext(workspace=tmp_path),
+        store=store,
+    )
+
+    assert outcome.run.status == "finished"
+    tool_messages = [
+        message for message in store.list_messages(session.id) if message.role == "tool"
+    ]
+    assert [message.name for message in tool_messages] == ["first", "second"]
+    assert [message.content for message in tool_messages] == ["first", "second"]
+    assert [message.name for message in provider.requests[1].messages[-2:]] == [
+        "first",
+        "second",
+    ]
+
+
+def test_run_agent_uses_non_parallel_tool_as_batch_barrier(tmp_path) -> None:
+    before_barrier = Barrier(2)
+    after_barrier = Barrier(2)
+    before_finished: set[str] = set()
+    barrier_finished = ThreadEvent()
+
+    @tool(permission="read", parallel_safe=True)
+    def before_one() -> str:
+        _ = before_barrier.wait(timeout=1)
+        before_finished.add("one")
+        return "before-one"
+
+    @tool(permission="read", parallel_safe=True)
+    def before_two() -> str:
+        _ = before_barrier.wait(timeout=1)
+        before_finished.add("two")
+        return "before-two"
+
+    @tool(permission="read")
+    def ordered_step() -> str:
+        if before_finished != {"one", "two"}:
+            raise RuntimeError("ordered step crossed the preceding read batch")
+        barrier_finished.set()
+        return "ordered"
+
+    @tool(permission="read", parallel_safe=True)
+    def after_one() -> str:
+        if not barrier_finished.is_set():
+            raise RuntimeError("read crossed the ordered step")
+        _ = after_barrier.wait(timeout=1)
+        return "after-one"
+
+    @tool(permission="read", parallel_safe=True)
+    def after_two() -> str:
+        if not barrier_finished.is_set():
+            raise RuntimeError("read crossed the ordered step")
+        _ = after_barrier.wait(timeout=1)
+        return "after-two"
+
+    tools = [before_one, before_two, ordered_step, after_one, after_two]
+    store = Store(":memory:")
+    session = _session_with_user_message(store)
+    provider = FakeProvider(
+        [
+            ProviderResponse(
+                tool_calls=[
+                    ToolCall(id="call_before_one", name="before_one"),
+                    ToolCall(id="call_before_two", name="before_two"),
+                    ToolCall(id="call_ordered", name="ordered_step"),
+                    ToolCall(id="call_after_one", name="after_one"),
+                    ToolCall(id="call_after_two", name="after_two"),
+                ]
+            ),
+            ProviderResponse.message("Ordered work complete."),
+        ]
+    )
+
+    outcome = run_agent(
+        agent=Agent(tools=[item.name for item in tools]),
+        session=session,
+        provider=provider,
+        registry=ToolRegistry(tools),
+        context=ExecutionContext(workspace=tmp_path),
+        store=store,
+    )
+
+    assert outcome.run.status == "finished"
+    tool_messages = [
+        message for message in store.list_messages(session.id) if message.role == "tool"
+    ]
+    assert [message.name for message in tool_messages] == [
+        "before_one",
+        "before_two",
+        "ordered_step",
+        "after_one",
+        "after_two",
+    ]
+    assert all(message.metadata["ok"] is True for message in tool_messages)
+
+
+def test_run_agent_preserves_other_parallel_results_when_one_tool_fails(
+    tmp_path,
+) -> None:
+    both_started = Barrier(2)
+
+    @tool(permission="read", parallel_safe=True)
+    def failing_read() -> str:
+        _ = both_started.wait(timeout=1)
+        raise RuntimeError("read failed")
+
+    @tool(permission="read", parallel_safe=True)
+    def successful_read() -> str:
+        _ = both_started.wait(timeout=1)
+        return "available"
+
+    store = Store(":memory:")
+    session = _session_with_user_message(store)
+    provider = FakeProvider(
+        [
+            ProviderResponse(
+                tool_calls=[
+                    ToolCall(id="call_failure", name="failing_read"),
+                    ToolCall(id="call_success", name="successful_read"),
+                ]
+            ),
+            ProviderResponse.message("Handled partial results."),
+        ]
+    )
+
+    outcome = run_agent(
+        agent=Agent(tools=["failing_read", "successful_read"]),
+        session=session,
+        provider=provider,
+        registry=ToolRegistry([failing_read, successful_read]),
+        context=ExecutionContext(workspace=tmp_path),
+        store=store,
+    )
+
+    assert outcome.run.status == "finished"
+    tool_messages = [
+        message for message in store.list_messages(session.id) if message.role == "tool"
+    ]
+    assert [message.metadata["ok"] for message in tool_messages] == [False, True]
+    assert [message.content for message in tool_messages] == [
+        "read failed",
+        "available",
+    ]
+
+
 def test_run_agent_waits_for_approval_and_continues(tmp_path) -> None:
     executions: list[str] = []
 
@@ -262,15 +454,17 @@ def test_run_agent_waits_for_approval_and_continues(tmp_path) -> None:
 
     store = Store(":memory:")
     session = _session_with_user_message(store)
-    provider = FakeProvider([
-        ProviderResponse(
-            tool_calls=[
-                ToolCall(id="call_read", name="inspect_workspace"),
-                ToolCall(id="call_write", name="update_workspace"),
-            ]
-        ),
-        ProviderResponse.message("Updates complete."),
-    ])
+    provider = FakeProvider(
+        [
+            ProviderResponse(
+                tool_calls=[
+                    ToolCall(id="call_read", name="inspect_workspace"),
+                    ToolCall(id="call_write", name="update_workspace"),
+                ]
+            ),
+            ProviderResponse.message("Updates complete."),
+        ]
+    )
     requested: list[ApprovalRequest] = []
 
     def approve(approval: ApprovalRequest) -> ApprovalDecision:
@@ -327,14 +521,16 @@ def test_run_agent_waits_for_approval_and_continues(tmp_path) -> None:
 def test_run_agent_approves_workspace_write_before_mutation(tmp_path) -> None:
     store = Store(":memory:")
     session = _session_with_user_message(store)
-    provider = FakeProvider([
-        ProviderResponse.tool(
-            "write_file",
-            {"path": "result.txt", "content": "approved\n"},
-            tool_call_id="call_write_file",
-        ),
-        ProviderResponse.message("File written."),
-    ])
+    provider = FakeProvider(
+        [
+            ProviderResponse.tool(
+                "write_file",
+                {"path": "result.txt", "content": "approved\n"},
+                tool_call_id="call_write_file",
+            ),
+            ProviderResponse.message("File written."),
+        ]
+    )
 
     def approve(_: ApprovalRequest) -> ApprovalDecision:
         assert (tmp_path / "result.txt").exists() is False
@@ -364,14 +560,16 @@ def test_run_agent_returns_user_denial_to_provider(tmp_path) -> None:
 
     store = Store(":memory:")
     session = _session_with_user_message(store)
-    provider = FakeProvider([
-        ProviderResponse.tool(
-            "update_workspace",
-            {},
-            tool_call_id="call_write",
-        ),
-        ProviderResponse.message("The update was denied."),
-    ])
+    provider = FakeProvider(
+        [
+            ProviderResponse.tool(
+                "update_workspace",
+                {},
+                tool_call_id="call_write",
+            ),
+            ProviderResponse.message("The update was denied."),
+        ]
+    )
 
     outcome = run_agent(
         agent=Agent(tools=["update_workspace"]),
@@ -410,14 +608,16 @@ def test_run_agent_cleans_up_approvals_when_callback_fails(tmp_path) -> None:
 
     store = Store(":memory:")
     session = _session_with_user_message(store)
-    provider = FakeProvider([
-        ProviderResponse(
-            tool_calls=[
-                ToolCall(id="call_first", name="update_first"),
-                ToolCall(id="call_second", name="update_second"),
-            ]
-        ),
-    ])
+    provider = FakeProvider(
+        [
+            ProviderResponse(
+                tool_calls=[
+                    ToolCall(id="call_first", name="update_first"),
+                    ToolCall(id="call_second", name="update_second"),
+                ]
+            ),
+        ]
+    )
     callback_calls = 0
 
     def fail_on_second(_: ApprovalRequest) -> ApprovalDecision:
@@ -468,10 +668,12 @@ def test_run_agent_denies_approval_without_callback(tmp_path) -> None:
 
     store = Store(":memory:")
     session = _session_with_user_message(store)
-    provider = FakeProvider([
-        ProviderResponse.tool("update_workspace", {}),
-        ProviderResponse.message("No approval handler was available."),
-    ])
+    provider = FakeProvider(
+        [
+            ProviderResponse.tool("update_workspace", {}),
+            ProviderResponse.message("No approval handler was available."),
+        ]
+    )
 
     outcome = run_agent(
         agent=Agent(tools=["update_workspace"]),
@@ -494,10 +696,12 @@ def test_run_agent_denies_approval_without_callback(tmp_path) -> None:
 def test_run_agent_returns_policy_denial_to_provider(tmp_path) -> None:
     store = Store(":memory:")
     session = _session_with_user_message(store)
-    provider = FakeProvider([
-        ProviderResponse.tool("missing", {}, tool_call_id="call_missing"),
-        ProviderResponse.message("I cannot use that tool."),
-    ])
+    provider = FakeProvider(
+        [
+            ProviderResponse.tool("missing", {}, tool_call_id="call_missing"),
+            ProviderResponse.message("I cannot use that tool."),
+        ]
+    )
 
     outcome = run_agent(
         agent=Agent(),
@@ -526,9 +730,11 @@ def test_run_agent_fails_at_iteration_limit(tmp_path) -> None:
 
     store = Store(":memory:")
     session = _session_with_user_message(store)
-    provider = FakeProvider([
-        ProviderResponse.tool("echo", {"value": "again"}),
-    ])
+    provider = FakeProvider(
+        [
+            ProviderResponse.tool("echo", {"value": "again"}),
+        ]
+    )
 
     outcome = run_agent(
         agent=Agent(tools=["echo"]),

@@ -27,6 +27,7 @@ class Tool:
     schema: ToolSchema
     permission: ToolPermission
     execute: ToolExecutor
+    parallel_safe: bool = False
 
     @property
     def name(self) -> str:
@@ -86,10 +87,12 @@ def tool(
     permission: ToolPermission,
     name: str | None = None,
     description: str | None = None,
+    parallel_safe: bool = False,
 ) -> Callable[[Callable[..., object]], Tool]:
     def decorator(fn: Callable[..., object]) -> Tool:
+        fn_name = cast(str, getattr(fn, "__name__", type(fn).__name__))
         if inspect.iscoroutinefunction(fn):
-            raise TypeError(f"Tool function must be synchronous: {fn.__name__}")
+            raise TypeError(f"Tool function must be synchronous: {fn_name}")
 
         signature = inspect.signature(fn)
         properties: JsonObject = {}
@@ -107,7 +110,7 @@ def tool(
                 required.append(param_name)
 
         schema = ToolSchema(
-            name=name or fn.__name__,
+            name=name or fn_name,
             description=description or inspect.getdoc(fn) or "",
             parameters={
                 "type": "object",
@@ -122,7 +125,12 @@ def tool(
                 kwargs["context"] = context
             return cast(ToolOutput, fn(**cast(dict[str, Any], kwargs)))
 
-        return Tool(schema=schema, permission=permission, execute=execute)
+        return Tool(
+            schema=schema,
+            permission=permission,
+            execute=execute,
+            parallel_safe=parallel_safe,
+        )
 
     return decorator
 

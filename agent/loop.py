@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 from agent.approvals import (
     ApprovalCallback,
     ApprovalPolicy,
@@ -18,6 +20,7 @@ from agent.models import (
     RunOutcome,
     Session,
     ToolCall,
+    ToolResult,
     utc_now,
 )
 from providers import Provider
@@ -26,8 +29,8 @@ from storage.store import Store
 from tools.base import ExecutionContext
 from tools.registry import ToolRegistry
 
-
 MAX_ITERATIONS = 20
+MAX_PARALLEL_TOOL_WORKERS = 8
 
 
 def _start_run(
@@ -312,6 +315,28 @@ def _execute_tool_call(
     context: ExecutionContext,
     store: Store,
 ) -> Message:
+    _record_tool_started(
+        tool_call=tool_call,
+        session=session,
+        run=run,
+        store=store,
+    )
+    result = registry.execute(tool_call, context)
+    return _save_tool_result(
+        result=result,
+        session=session,
+        run=run,
+        store=store,
+    )
+
+
+def _record_tool_started(
+    *,
+    tool_call: ToolCall,
+    session: Session,
+    run: Run,
+    store: Store,
+) -> None:
     store.append_event(
         Event(
             type="tool.started",
@@ -325,8 +350,14 @@ def _execute_tool_call(
         )
     )
 
-    result = registry.execute(tool_call, context)
 
+def _save_tool_result(
+    *,
+    result: ToolResult,
+    session: Session,
+    run: Run,
+    store: Store,
+) -> Message:
     metadata = dict(result.metadata)
     metadata["ok"] = result.ok
 
@@ -369,6 +400,132 @@ def _execute_tool_call(
     )
 
     return message
+
+
+def _execute_parallel_tool_calls(
+    *,
+    tool_calls: list[ToolCall],
+    session: Session,
+    run: Run,
+    registry: ToolRegistry,
+    context: ExecutionContext,
+    store: Store,
+) -> list[Message]:
+    if len(tool_calls) < 2:
+        return [
+            _execute_tool_call(
+                tool_call=tool_calls[0],
+                session=session,
+                run=run,
+                registry=registry,
+                context=context,
+                store=store,
+            )
+        ]
+
+    max_workers = min(len(tool_calls), MAX_PARALLEL_TOOL_WORKERS)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = []
+        for tool_call in tool_calls:
+            _record_tool_started(
+                tool_call=tool_call,
+                session=session,
+                run=run,
+                store=store,
+            )
+            futures.append(executor.submit(registry.execute, tool_call, context))
+
+        results = [future.result() for future in futures]
+
+    return [
+        _save_tool_result(
+            result=result,
+            session=session,
+            run=run,
+            store=store,
+        )
+        for result in results
+    ]
+
+
+def _execute_tool_decisions(
+    *,
+    decisions: list[ToolCallDecision],
+    approvals_by_tool_call: dict[str, ApprovalRequest],
+    session: Session,
+    run: Run,
+    registry: ToolRegistry,
+    context: ExecutionContext,
+    store: Store,
+    approval_callback: ApprovalCallback | None,
+) -> list[Message]:
+    messages: list[Message] = []
+    parallel_calls: list[ToolCall] = []
+
+    def flush_parallel_calls() -> None:
+        if not parallel_calls:
+            return
+        messages.extend(
+            _execute_parallel_tool_calls(
+                tool_calls=parallel_calls,
+                session=session,
+                run=run,
+                registry=registry,
+                context=context,
+                store=store,
+            )
+        )
+        parallel_calls.clear()
+
+    for decision in decisions:
+        approval = approvals_by_tool_call.get(decision.tool_call.id)
+        denied = decision.decision.action == "deny" or (
+            approval is not None and approval.status == "denied"
+        )
+        allowed = decision.decision.action == "allow" or (
+            approval is not None and approval.status == "approved"
+        )
+
+        if denied:
+            flush_parallel_calls()
+            messages.append(
+                _deny_tool_call(
+                    decision=decision,
+                    session=session,
+                    run=run,
+                    store=store,
+                    approval=approval,
+                    denial_reason=(
+                        "Tool call denied because no approval callback is configured"
+                        if approval is not None and approval_callback is None
+                        else None
+                    ),
+                )
+            )
+            continue
+
+        if not allowed:
+            raise RuntimeError("Unresolved approval reached tool execution")
+
+        registered_tool = registry.get(decision.tool_call.name)
+        if registered_tool is not None and registered_tool.parallel_safe:
+            parallel_calls.append(decision.tool_call)
+            continue
+
+        flush_parallel_calls()
+        messages.append(
+            _execute_tool_call(
+                tool_call=decision.tool_call,
+                session=session,
+                run=run,
+                registry=registry,
+                context=context,
+                store=store,
+            )
+        )
+
+    flush_parallel_calls()
+    return messages
 
 
 def _finish_run(
@@ -509,37 +666,18 @@ def run_agent(
                     callback=approval_callback,
                 )
 
-            for decision in decisions:
-                approval = approvals_by_tool_call.get(decision.tool_call.id)
-                if decision.decision.action == "deny" or (
-                    approval is not None and approval.status == "denied"
-                ):
-                    tool_message = _deny_tool_call(
-                        decision=decision,
-                        session=session,
-                        run=run,
-                        store=store,
-                        approval=approval,
-                        denial_reason=(
-                            "Tool call denied because no approval callback is configured"
-                            if approval is not None and approval_callback is None
-                            else None
-                        ),
-                    )
-                elif decision.decision.action == "allow" or (
-                    approval is not None and approval.status == "approved"
-                ):
-                    tool_message = _execute_tool_call(
-                        tool_call=decision.tool_call,
-                        session=session,
-                        run=run,
-                        registry=allowed_registry,
-                        context=context,
-                        store=store,
-                    )
-                else:
-                    raise RuntimeError("Unresolved approval reached tool execution")
-                messages.append(tool_message)
+            messages.extend(
+                _execute_tool_decisions(
+                    decisions=decisions,
+                    approvals_by_tool_call=approvals_by_tool_call,
+                    session=session,
+                    run=run,
+                    registry=allowed_registry,
+                    context=context,
+                    store=store,
+                    approval_callback=approval_callback,
+                )
+            )
 
     except Exception as exc:
         _ = _fail_run(
