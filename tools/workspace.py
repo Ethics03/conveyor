@@ -8,11 +8,7 @@ from pathlib import Path
 from shutil import which
 from typing import Literal, cast
 
-from tools.base import ExecutionContext
-from tools.base import JsonObject
-from tools.base import JsonValue
-from tools.base import tool
-
+from tools.base import ExecutionContext, JsonObject, JsonValue, tool
 
 DEFAULT_READ_OFFSET = 1
 DEFAULT_READ_LIMIT = 500
@@ -189,6 +185,7 @@ def _ripgrep_content(
 @tool(
     permission="read",
     description="Search workspace files by name or content using ripgrep.",
+    parallel_safe=True,
 )
 def search_files(
     pattern: str,
@@ -216,7 +213,7 @@ def search_files(
                 workspace=workspace,
                 root=root,
                 glob_pattern=_file_search_glob(pattern),
-        )
+            )
 
         end = normalized_offset + normalized_limit
         file_page: list[str] = files[normalized_offset:end]
@@ -293,6 +290,7 @@ def _read_text_file(
 @tool(
     permission="read",
     description="Read a UTF-8 text file from the workspace with line pagination.",
+    parallel_safe=True,
 )
 def read_file(
     path: str,
@@ -311,6 +309,7 @@ def read_file(
 @tool(
     permission="read",
     description="Read multiple UTF-8 workspace files in one bounded batch.",
+    parallel_safe=True,
 )
 def read_many(
     paths: list[str],
@@ -339,18 +338,22 @@ def read_many(
                 limit=limit,
             )
         except (OSError, UnicodeError, WorkspacePathError) as exc:
-            errors.append({
-                "path": path,
-                "error": str(exc),
-            })
+            errors.append(
+                {
+                    "path": path,
+                    "error": str(exc),
+                }
+            )
             continue
 
         content = result.get("content")
         if not isinstance(content, str):
-            errors.append({
-                "path": path,
-                "error": "File reader returned invalid content",
-            })
+            errors.append(
+                {
+                    "path": path,
+                    "error": "File reader returned invalid content",
+                }
+            )
             continue
 
         remaining_chars = normalized_max_chars - total_chars

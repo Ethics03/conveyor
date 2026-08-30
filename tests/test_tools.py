@@ -25,6 +25,7 @@ def test_tool_decorator_builds_schema_and_executes(tmp_path) -> None:
         "count": {"type": "integer"},
     }
     assert echo.schema.parameters["required"] == ["value"]
+    assert echo.parallel_safe is False
 
     result = registry.execute(
         ToolCall(name="echo", arguments={"value": "ha", "count": 2}),
@@ -35,6 +36,14 @@ def test_tool_decorator_builds_schema_and_executes(tmp_path) -> None:
     assert result.name == "echo"
     assert result.content == "haha"
     assert result.metadata == {"permission": "read", "content_type": "text/plain"}
+
+
+def test_tool_decorator_marks_parallel_safe_tools() -> None:
+    @tool(permission="read", parallel_safe=True)
+    def inspect_workspace() -> str:
+        return "ok"
+
+    assert inspect_workspace.parallel_safe is True
 
 
 def test_tool_decorator_builds_string_literal_enum() -> None:
@@ -78,14 +87,20 @@ def test_registry_subset_exposes_and_executes_only_requested_tools(tmp_path) -> 
 
     assert subset.names() == ["allowed"]
     assert [schema.name for schema in subset.schemas()] == ["allowed"]
-    assert subset.execute(
-        ToolCall(name="allowed"),
-        ExecutionContext(workspace=tmp_path),
-    ).ok is True
-    assert subset.execute(
-        ToolCall(name="hidden"),
-        ExecutionContext(workspace=tmp_path),
-    ).ok is False
+    assert (
+        subset.execute(
+            ToolCall(name="allowed"),
+            ExecutionContext(workspace=tmp_path),
+        ).ok
+        is True
+    )
+    assert (
+        subset.execute(
+            ToolCall(name="hidden"),
+            ExecutionContext(workspace=tmp_path),
+        ).ok
+        is False
+    )
 
 
 def test_registry_subset_rejects_unknown_requested_tools() -> None:
@@ -104,6 +119,14 @@ def test_build_default_registry_registers_workspace_tools() -> None:
         "search_files",
         "write_file",
     ]
+    for name in ["read_file", "read_many", "search_files"]:
+        registered_tool = registry.get(name)
+        assert registered_tool is not None
+        assert registered_tool.parallel_safe is True
+
+    write_tool = registry.get("write_file")
+    assert write_tool is not None
+    assert write_tool.parallel_safe is False
     assert registry.permissions()["write_file"] == "write"
 
 
