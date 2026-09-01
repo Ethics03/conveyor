@@ -114,6 +114,7 @@ def test_build_default_registry_registers_workspace_tools() -> None:
     registry = build_default_registry()
 
     assert registry.names() == [
+        "bash",
         "read_file",
         "read_many",
         "search_files",
@@ -128,6 +129,11 @@ def test_build_default_registry_registers_workspace_tools() -> None:
     assert write_tool is not None
     assert write_tool.parallel_safe is False
     assert registry.permissions()["write_file"] == "write"
+
+    bash_tool = registry.get("bash")
+    assert bash_tool is not None
+    assert bash_tool.parallel_safe is False
+    assert registry.permissions()["bash"] == "dangerous"
 
 
 def test_registry_rejects_duplicate_tool_names() -> None:
