@@ -28,3 +28,6 @@ class Provider(Protocol):
 
     def generate(self, request: ProviderRequest) -> ProviderResponse:
         ...
+
+    def close(self) -> None:
+        ...
