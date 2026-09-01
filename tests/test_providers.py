@@ -6,6 +6,7 @@ from anthropic.types import Usage
 from agent.models import ProviderMessage, ProviderResponse, ToolCall
 from providers.anthropic_provider import AnthropicProvider, _anthropic_messages
 from providers.base import ProviderRequest
+from providers.fake import FakeProvider
 
 
 def test_anthropic_provider_repr_redacts_api_key() -> None:
@@ -31,6 +32,17 @@ def test_provider_response_can_contain_text_and_tool_calls() -> None:
     assert len(response.tool_calls) == 1
     assert response.tool_calls[0].id == "call_readme"
     assert response.tool_calls[0].name == "read_file"
+
+
+def test_fake_provider_rejects_requests_after_close() -> None:
+    provider = FakeProvider()
+
+    provider.close()
+    provider.close()
+
+    assert provider.closed is True
+    with pytest.raises(RuntimeError, match="Provider is closed"):
+        provider.generate(ProviderRequest(messages=[]))
 
 
 def test_anthropic_messages_preserve_tool_call_relationships() -> None:

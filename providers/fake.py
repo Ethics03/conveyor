@@ -15,8 +15,12 @@ class FakeProvider:
             responses or [ProviderResponse.message("ok")]
         )
         self.requests: list[ProviderRequest] = []
+        self.closed = False
 
     def generate(self, request: ProviderRequest) -> ProviderResponse:
+        if self.closed:
+            raise RuntimeError("Provider is closed")
+
         self.requests.append(request)
         if not self._responses:
             return ProviderResponse.message("ok")
@@ -25,3 +29,6 @@ class FakeProvider:
         if isinstance(response, str):
             return ProviderResponse.message(response)
         return response
+
+    def close(self) -> None:
+        self.closed = True

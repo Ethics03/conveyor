@@ -759,6 +759,9 @@ def test_run_agent_persists_provider_failure(tmp_path) -> None:
         def generate(self, request: ProviderRequest) -> ProviderResponse:
             raise RuntimeError("provider unavailable")
 
+        def close(self) -> None:
+            pass
+
     store = Store(":memory:")
     session = _session_with_user_message(store)
 
