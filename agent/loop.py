@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 
 from agent.approvals import (
     ApprovalCallback,
@@ -425,7 +425,7 @@ def _execute_parallel_tool_calls(
 
     max_workers = min(len(tool_calls), MAX_PARALLEL_TOOL_WORKERS)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = []
+        futures: list[Future[ToolResult]] = []
         for tool_call in tool_calls:
             _record_tool_started(
                 tool_call=tool_call,
