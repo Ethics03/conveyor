@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import uuid7
-
 
 SessionStatus = Literal["active", "archived"]
 RunStatus = Literal["pending", "running", "blocked", "finished", "cancelled", "failed"]
@@ -32,7 +31,7 @@ def new_id(prefix: str) -> str:
 
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 @dataclass(slots=True)
@@ -148,7 +147,7 @@ class ProviderResponse:
         content: str,
         raw: dict[str, Any] | None = None,
         finish_reason: str | None = "stop",
-    ) -> "ProviderResponse":
+    ) -> ProviderResponse:
         return cls(content=content, finish_reason=finish_reason, raw=raw or {})
 
     @classmethod
@@ -161,7 +160,7 @@ class ProviderResponse:
         tool_call_id: str | None = None,
         content: str = "",
         finish_reason: str | None = "tool_use",
-    ) -> "ProviderResponse":
+    ) -> ProviderResponse:
         tool_call = ToolCall(name=name, arguments=arguments)
         if tool_call_id is not None:
             tool_call.id = tool_call_id

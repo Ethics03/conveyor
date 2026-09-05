@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import pytest
 from shutil import which
+
+import pytest
 
 from agent.models import ToolCall
 from tools.base import ExecutionContext
