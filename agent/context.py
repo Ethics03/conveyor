@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from math import isfinite
 
 from agent.models import Agent, Message, ProviderMessage, Run, Session
 from providers.base import ProviderRequest
+
+PROTECTED_RECENT_TURNS = 2
+MIN_CLEARABLE_TOOL_RESULT_CHARS = 4_096
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +72,53 @@ class ContextUsage:
     @property
     def total_tokens(self) -> int:
         return self.system_tokens + self.history_tokens + self.tool_tokens
+
+
+def group_conversation_turns(messages: list[Message]) -> list[tuple[Message, ...]]:
+    """Group each user message with every response produced before the next user."""
+    groups: list[tuple[Message, ...]] = []
+    current: list[Message] = []
+
+    for message in messages:
+        if message.role == "user" and current:
+            groups.append(tuple(current))
+            current = []
+        current.append(message)
+
+    if current:
+        groups.append(tuple(current))
+
+    return groups
+
+
+def clear_tool_results(messages: list[Message]) -> list[Message]:
+    """Clear bulky old tool payloads while preserving transcript structure."""
+    groups = group_conversation_turns(messages)
+    protected_start = max(0, len(groups) - PROTECTED_RECENT_TURNS)
+    reduced: list[Message] = []
+
+    for index, group in enumerate(groups):
+        for message in group:
+            if (
+                index < protected_start
+                and message.role == "tool"
+                and len(message.content) >= MIN_CLEARABLE_TOOL_RESULT_CHARS
+            ):
+                tool_name = message.name or "tool"
+                reduced.append(
+                    replace(
+                        message,
+                        content=(
+                            f"[{tool_name} result omitted from active context: "
+                            f"{len(message.content)} characters. "
+                            "The original result remains in the session transcript.]"
+                        ),
+                    )
+                )
+            else:
+                reduced.append(message)
+
+    return reduced
 
 
 def _estimate_json_tokens(value: object) -> int:

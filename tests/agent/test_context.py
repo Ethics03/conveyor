@@ -5,7 +5,14 @@ from datetime import UTC, datetime
 
 import pytest
 
-from agent.context import ContextBudget, build_provider_messages, estimate_request_usage
+from agent.context import (
+    MIN_CLEARABLE_TOOL_RESULT_CHARS,
+    ContextBudget,
+    build_provider_messages,
+    clear_tool_results,
+    estimate_request_usage,
+    group_conversation_turns,
+)
 from agent.models import Agent, Message, ProviderMessage, Run, Session, ToolCall
 from providers.base import ProviderRequest, ToolSchema
 
@@ -50,6 +57,92 @@ def test_context_budget_rejects_invalid_configuration(
 ) -> None:
     with pytest.raises(ValueError):
         ContextBudget(window, output, margin, trigger, target)
+
+
+def test_group_conversation_turns_keeps_tool_exchange_with_its_user_turn() -> None:
+    first_user = Message(role="user", content="Inspect the file")
+    tool_call = ToolCall(id="call_read", name="read_file")
+    assistant_call = Message(role="assistant", tool_calls=[tool_call])
+    tool_result = Message(
+        role="tool",
+        name="read_file",
+        tool_call_id=tool_call.id,
+        content="contents",
+    )
+    first_answer = Message(role="assistant", content="Done")
+    second_user = Message(role="user", content="What changed?")
+    second_answer = Message(role="assistant", content="Nothing")
+
+    groups = group_conversation_turns(
+        [
+            first_user,
+            assistant_call,
+            tool_result,
+            first_answer,
+            second_user,
+            second_answer,
+        ]
+    )
+
+    assert groups == [
+        (first_user, assistant_call, tool_result, first_answer),
+        (second_user, second_answer),
+    ]
+
+
+def test_clear_tool_results_preserves_pairing_and_stored_messages() -> None:
+    old_payload = "x" * MIN_CLEARABLE_TOOL_RESULT_CHARS
+    old_call = ToolCall(id="call_old", name="read_file")
+    old_assistant = Message(role="assistant", tool_calls=[old_call])
+    old_result = Message(
+        role="tool",
+        name="read_file",
+        tool_call_id=old_call.id,
+        content=old_payload,
+    )
+    messages = [
+        Message(role="user", content="Old turn"),
+        old_assistant,
+        old_result,
+        Message(role="assistant", content="Old answer"),
+        Message(role="user", content="Recent turn one"),
+        Message(role="assistant", content="Recent answer one"),
+        Message(role="user", content="Recent turn two"),
+        Message(role="assistant", content="Recent answer two"),
+    ]
+
+    reduced = clear_tool_results(messages)
+
+    assert old_result.content == old_payload
+    assert reduced[1] is old_assistant
+    assert reduced[2] is not old_result
+    assert reduced[2].tool_call_id == old_call.id
+    assert reduced[2].name == "read_file"
+    assert reduced[2].content == (
+        "[read_file result omitted from active context: 4096 characters. "
+        "The original result remains in the session transcript.]"
+    )
+
+
+def test_clear_tool_results_keeps_small_and_recent_results() -> None:
+    old_small = Message(role="tool", content="small", name="search_files")
+    recent_large = Message(
+        role="tool",
+        content="y" * MIN_CLEARABLE_TOOL_RESULT_CHARS,
+        name="read_file",
+    )
+    messages = [
+        Message(role="user", content="Old turn"),
+        old_small,
+        Message(role="user", content="Recent turn one"),
+        recent_large,
+        Message(role="user", content="Recent turn two"),
+        Message(role="assistant", content="Recent answer"),
+    ]
+
+    reduced = clear_tool_results(messages)
+
+    assert reduced == messages
 
 
 def test_estimate_request_usage_includes_system_history_and_tool_schemas() -> None:
