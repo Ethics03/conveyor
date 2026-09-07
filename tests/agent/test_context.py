@@ -8,10 +8,14 @@ import pytest
 from agent.context import (
     MIN_CLEARABLE_TOOL_RESULT_CHARS,
     ContextBudget,
+    ContextMeasurement,
+    ContextPlan,
+    ContextUsage,
     build_provider_messages,
     clear_tool_results,
     estimate_request_usage,
     group_conversation_turns,
+    plan_context,
 )
 from agent.models import Agent, Message, ProviderMessage, Run, Session, ToolCall
 from providers.base import ProviderRequest, ToolSchema
@@ -57,6 +61,77 @@ def test_context_budget_rejects_invalid_configuration(
 ) -> None:
     with pytest.raises(ValueError):
         ContextBudget(window, output, margin, trigger, target)
+
+
+def test_context_measurement_records_source_and_optional_breakdown() -> None:
+    usage = ContextUsage(system_tokens=10, history_tokens=20, tool_tokens=5)
+
+    measurement = ContextMeasurement(
+        input_tokens=usage.total_tokens,
+        source="heuristic",
+        usage=usage,
+    )
+
+    assert measurement.input_tokens == 35
+    assert measurement.source == "heuristic"
+    assert measurement.usage == usage
+
+
+def test_context_measurement_rejects_negative_input_tokens() -> None:
+    with pytest.raises(ValueError, match="input_tokens cannot be negative"):
+        ContextMeasurement(input_tokens=-1, source="provider")
+
+
+def test_context_plan_records_sendable_request_and_decisions() -> None:
+    request = ProviderRequest(
+        messages=[ProviderMessage(role="user", content="Continue")],
+    )
+    before = ContextMeasurement(input_tokens=8_500, source="heuristic")
+    after = ContextMeasurement(input_tokens=6_500, source="heuristic")
+
+    plan = ContextPlan(
+        request=request,
+        before=before,
+        after=after,
+        compaction_triggered=True,
+        cleared_tool_results=3,
+        summary_required=False,
+    )
+
+    assert plan.request is request
+    assert plan.before is before
+    assert plan.after is after
+    assert plan.compaction_triggered is True
+    assert plan.cleared_tool_results == 3
+    assert plan.summary_required is False
+
+
+def test_context_plan_rejects_negative_clear_count() -> None:
+    measurement = ContextMeasurement(input_tokens=100, source="heuristic")
+
+    with pytest.raises(ValueError, match="cleared_tool_results cannot be negative"):
+        ContextPlan(
+            request=ProviderRequest(messages=[]),
+            before=measurement,
+            after=measurement,
+            compaction_triggered=True,
+            cleared_tool_results=-1,
+            summary_required=False,
+        )
+
+
+def test_context_plan_rejects_work_without_trigger() -> None:
+    measurement = ContextMeasurement(input_tokens=100, source="heuristic")
+
+    with pytest.raises(ValueError, match="untriggered context plan"):
+        ContextPlan(
+            request=ProviderRequest(messages=[]),
+            before=measurement,
+            after=measurement,
+            compaction_triggered=False,
+            cleared_tool_results=1,
+            summary_required=False,
+        )
 
 
 def test_group_conversation_turns_keeps_tool_exchange_with_its_user_turn() -> None:
@@ -143,6 +218,102 @@ def test_clear_tool_results_keeps_small_and_recent_results() -> None:
     reduced = clear_tool_results(messages)
 
     assert reduced == messages
+
+
+def test_plan_context_returns_unchanged_request_below_trigger() -> None:
+    agent = Agent(model="test-model", instructions="Be concise.")
+    message = Message(role="user", content="Hello")
+    tools = [ToolSchema(name="read_file", description="Read a file")]
+    budget = ContextBudget(
+        context_window_tokens=100_000,
+        max_output_tokens=4_000,
+    )
+
+    plan = plan_context(
+        agent=agent,
+        messages=[message],
+        tools=tools,
+        budget=budget,
+    )
+
+    assert plan.compaction_triggered is False
+    assert plan.cleared_tool_results == 0
+    assert plan.summary_required is False
+    assert plan.before is plan.after
+    assert plan.request.model == "test-model"
+    assert plan.request.max_tokens == 4_000
+    assert plan.request.tools == tools
+    assert plan.request.tools is not tools
+    assert plan.request.messages[-1] == ProviderMessage(
+        role="user",
+        content="Hello",
+    )
+
+
+def test_plan_context_clears_old_results_and_remeasures() -> None:
+    old_payload = "x" * 40_000
+    tool_call = ToolCall(id="call_old", name="read_file")
+    messages = [
+        Message(role="user", content="Old turn"),
+        Message(role="assistant", tool_calls=[tool_call]),
+        Message(
+            role="tool",
+            name="read_file",
+            tool_call_id=tool_call.id,
+            content=old_payload,
+        ),
+        Message(role="assistant", content="Old answer"),
+        Message(role="user", content="Recent turn one"),
+        Message(role="assistant", content="Recent answer one"),
+        Message(role="user", content="Recent turn two"),
+    ]
+    budget = ContextBudget(
+        context_window_tokens=12_000,
+        max_output_tokens=1_000,
+        safety_margin_tokens=1_000,
+    )
+
+    plan = plan_context(
+        agent=Agent(),
+        messages=messages,
+        tools=[],
+        budget=budget,
+    )
+
+    compacted_result = next(
+        message
+        for message in plan.request.messages
+        if message.tool_call_id == tool_call.id
+    )
+    assert plan.before.input_tokens >= budget.trigger_tokens
+    assert plan.after.input_tokens < plan.before.input_tokens
+    assert plan.after.input_tokens < budget.trigger_tokens
+    assert plan.compaction_triggered is True
+    assert plan.cleared_tool_results == 1
+    assert plan.summary_required is False
+    assert "result omitted from active context" in compacted_result.content
+    assert messages[2].content == old_payload
+
+
+def test_plan_context_requests_summary_when_cleanup_cannot_reach_trigger() -> None:
+    budget = ContextBudget(
+        context_window_tokens=12_000,
+        max_output_tokens=1_000,
+        safety_margin_tokens=1_000,
+    )
+
+    plan = plan_context(
+        agent=Agent(),
+        messages=[Message(role="user", content="x" * 40_000)],
+        tools=[],
+        budget=budget,
+    )
+
+    assert plan.before.input_tokens >= budget.trigger_tokens
+    assert plan.after is plan.before
+    assert plan.compaction_triggered is True
+    assert plan.cleared_tool_results == 0
+    assert plan.summary_required is True
 
 
 def test_estimate_request_usage_includes_system_history_and_tool_schemas() -> None:
