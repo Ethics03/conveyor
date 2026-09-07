@@ -7,7 +7,7 @@ from datetime import datetime
 from functools import wraps
 from pathlib import Path
 from threading import RLock
-from typing import Any, Concatenate, ParamSpec, TypeVar
+from typing import Any, Concatenate, Literal
 
 from agent.models import (
     ApprovalDecision,
@@ -20,14 +20,11 @@ from agent.models import (
     ToolCall,
     utc_now,
 )
+from agent.titles import clean_session_title
 from storage.schema import SCHEMA, SCHEMA_VERSION
 
 
-P = ParamSpec("P")
-R = TypeVar("R")
-
-
-def _serialized(
+def _serialized[**P, R](
     method: Callable[Concatenate[Store, P], R],
 ) -> Callable[Concatenate[Store, P], R]:
     @wraps(method)
@@ -67,22 +64,65 @@ class Store:
     def save_session(self, session: Session) -> None:
         self._conn.execute(
             """
-            INSERT INTO sessions (id, title, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO sessions (
+                id, title, title_source, status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
-                title = excluded.title,
                 status = excluded.status,
                 updated_at = excluded.updated_at
             """,
             (
                 session.id,
                 session.title,
+                session.title_source,
                 session.status,
                 _dump_dt(session.created_at),
                 _dump_dt(session.updated_at),
             ),
         )
         self._conn.commit()
+
+    @_serialized
+    def set_session_title(self, session_id: str, title: str) -> bool:
+        """Set a user-authored title that automatic naming cannot replace."""
+        return self._set_session_title(
+            session_id=session_id,
+            title=title,
+            source="user",
+        )
+
+    @_serialized
+    def set_auto_title(self, session_id: str, title: str) -> bool:
+        """Set a derived title only while the session still has its default."""
+        return self._set_session_title(
+            session_id=session_id,
+            title=title,
+            source="auto",
+        )
+
+    def _set_session_title(
+        self,
+        *,
+        session_id: str,
+        title: str,
+        source: Literal["auto", "user"],
+    ) -> bool:
+        cleaned = clean_session_title(title)
+        query = (
+            "UPDATE sessions "
+            "SET title = ?, title_source = ?, updated_at = ? "
+            "WHERE id = ?"
+        )
+        if source == "auto":
+            query += " AND title_source = 'default'"
+
+        cursor = self._conn.execute(
+            query,
+            (cleaned, source, _dump_dt(utc_now()), session_id),
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
 
     @_serialized
     def get_session(self, session_id: str) -> Session | None:
@@ -94,6 +134,7 @@ class Store:
         return Session(
             id=row["id"],
             title=row["title"],
+            title_source=row["title_source"],
             status=row["status"],
             created_at=_load_dt(row["created_at"]),
             updated_at=_load_dt(row["updated_at"]),
@@ -112,6 +153,7 @@ class Store:
             Session(
                 id=row["id"],
                 title=row["title"],
+                title_source=row["title_source"],
                 status=row["status"],
                 created_at=_load_dt(row["created_at"]),
                 updated_at=_load_dt(row["updated_at"]),

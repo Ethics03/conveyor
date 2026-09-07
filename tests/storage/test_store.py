@@ -26,7 +26,7 @@ def store() -> Store:
 
 
 def test_session_roundtrip(store: Store) -> None:
-    session = Session(title="hello")
+    session = Session(title="hello", title_source="user")
     store.save_session(session)
 
     loaded = store.get_session(session.id)
@@ -43,9 +43,42 @@ def test_session_upsert_updates(store: Store) -> None:
 
     loaded = store.get_session(session.id)
     assert loaded is not None
-    assert loaded.title == "after"
+    assert loaded.title == "before"
     assert loaded.status == "archived"
     assert len(store.list_sessions()) == 1
+
+
+def test_auto_title_only_replaces_default_title(store: Store) -> None:
+    session = Session()
+    store.save_session(session)
+
+    assert store.set_auto_title(session.id, "  Fix   provider timeout ") is True
+    loaded = store.get_session(session.id)
+    assert loaded is not None
+    assert loaded.title == "Fix provider timeout"
+    assert loaded.title_source == "auto"
+    assert store.set_auto_title(session.id, "Replace it again") is False
+    unchanged = store.get_session(session.id)
+    assert unchanged is not None
+    assert unchanged.title == "Fix provider timeout"
+
+
+def test_user_title_replaces_auto_title_and_cannot_be_overwritten(store: Store) -> None:
+    session = Session()
+    store.save_session(session)
+    assert store.set_auto_title(session.id, "Automatic title") is True
+
+    assert store.set_session_title(session.id, "User title") is True
+    assert store.set_auto_title(session.id, "Late automatic title") is False
+
+    loaded = store.get_session(session.id)
+    assert loaded is not None
+    assert loaded.title == "User title"
+    assert loaded.title_source == "user"
+
+
+def test_set_session_title_returns_false_for_unknown_session(store: Store) -> None:
+    assert store.set_session_title("ses_missing", "Missing") is False
 
 
 def test_store_can_be_used_from_worker_thread(store: Store) -> None:
