@@ -11,6 +11,8 @@ CREATE TABLE IF NOT EXISTS meta (
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
+    title_source TEXT NOT NULL DEFAULT 'default'
+        CHECK (title_source IN ('default', 'auto', 'user')),
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL

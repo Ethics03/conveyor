@@ -22,6 +22,7 @@ def test_create_session_persists_after_reopen(tmp_path: Path, title: str | None)
             else runtime.create_session(title)
         )
         assert session.title == ("New session" if title is None else title)
+        assert session.title_source == ("default" if title is None else "user")
         assert session.status == "active"
         assert provider.requests == []
 
@@ -95,6 +96,46 @@ def test_run_turn_persists_input_and_executes_agent(tmp_path: Path) -> None:
         ]
         assert events[0].message_id == messages[0].id
         assert provider.requests[-1].messages[-1].content == "  Keep this spacing.  "
+        assert len(provider.requests) == 1
+
+
+def test_run_turn_generates_title_for_default_session(tmp_path: Path) -> None:
+    store = Store()
+    provider = FakeProvider(["Your interview is at 3 PM.", '"Interview Today"'])
+
+    with Runtime(store, provider, ToolRegistry(), tmp_path) as runtime:
+        session = runtime.create_session()
+        outcome = runtime.run_turn(
+            agent=Agent(model="test-model"),
+            session=session,
+            content="Do I have an interview today?",
+        )
+
+        assert outcome.run.status == "finished"
+        assert session.title == "Interview Today"
+        assert session.title_source == "auto"
+        assert store.get_session(session.id) == session
+        assert len(provider.requests) == 2
+        assert provider.requests[1].metadata == {"purpose": "session_title"}
+        assert provider.requests[1].model == "test-model"
+
+
+def test_run_turn_falls_back_when_generated_title_is_invalid(tmp_path: Path) -> None:
+    store = Store()
+    provider = FakeProvider(["I can help with that.", ""])
+
+    with Runtime(store, provider, ToolRegistry(), tmp_path) as runtime:
+        session = runtime.create_session()
+        outcome = runtime.run_turn(
+            agent=Agent(),
+            session=session,
+            content="Debug the existing ingestion pipeline",
+        )
+
+        assert outcome.run.status == "finished"
+        assert session.title == "Debug the existing ingestion pipeline"
+        assert session.title_source == "auto"
+        assert store.get_session(session.id) == session
 
 
 @pytest.mark.parametrize(

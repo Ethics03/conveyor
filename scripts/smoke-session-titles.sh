@@ -10,4 +10,4 @@ fi
 
 cd "$repo_root"
 
-uv run "${uv_args[@]}" python -m scripts.smoke_agent "$@"
+uv run "${uv_args[@]}" python -m scripts.smoke_session_titles "$@"

@@ -6,6 +6,7 @@ from typing import Any, Literal
 from uuid import uuid7
 
 SessionStatus = Literal["active", "archived"]
+SessionTitleSource = Literal["default", "auto", "user"]
 RunStatus = Literal["pending", "running", "blocked", "finished", "cancelled", "failed"]
 MessageRole = Literal["user", "assistant", "system", "tool"]
 EventType = Literal[
@@ -47,6 +48,7 @@ class Agent:
 class Session:
     id: str = field(default_factory=lambda: new_id("ses"))
     title: str = "New session"
+    title_source: SessionTitleSource = "default"
     status: SessionStatus = "active"
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)

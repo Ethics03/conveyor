@@ -1,23 +1,21 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
-import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from agent.loop import run_agent
 from agent.models import (
     Agent,
     ApprovalDecision,
     ApprovalRequest,
     Event,
-    Message,
     Session,
 )
+from agent.runtime import Runtime
 from providers.anthropic_provider import AnthropicProvider
 from storage.store import Store
-from tools.base import ExecutionContext
 from tools.defaults import build_default_registry
 
 
@@ -52,23 +50,6 @@ def prompt_for_approval(approval: ApprovalRequest) -> ApprovalDecision:
         print("answer with y or n")
 
 
-def save_user_message(store: Store, session: Session, content: str) -> None:
-    message = Message(
-        session_id=session.id,
-        role="user",
-        content=content,
-    )
-    store.save_message(message)
-    store.append_event(
-        Event(
-            type="message.created",
-            session_id=session.id,
-            message_id=message.id,
-            payload={"role": message.role},
-        )
-    )
-
-
 def print_messages(store: Store, session: Session) -> None:
     for message in store.list_messages(session.id):
         content = message.content
@@ -83,18 +64,48 @@ def print_events(store: Store, session: Session) -> None:
         print(json.dumps(asdict(event), default=str))
 
 
+def resolve_session(runtime: Runtime, session_id: str | None) -> Session:
+    if session_id is None:
+        return runtime.create_session()
+
+    session = runtime.store.get_session(session_id)
+    if session is None:
+        raise ValueError(f"Session does not exist: {session_id}")
+    if session.status != "active":
+        raise ValueError(f"Session is not active: {session_id}")
+    return session
+
+
 def main() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    parser = argparse.ArgumentParser(description="Run an interactive Conveyor agent")
+    parser.add_argument(
+        "workspace",
+        nargs="?",
+        default=str(repo_root),
+        help="workspace exposed to agent tools",
+    )
+    parser.add_argument(
+        "--database",
+        default=str(repo_root / ".conveyor" / "smoke-agent.db"),
+        help="SQLite database used for durable sessions",
+    )
+    parser.add_argument(
+        "--resume",
+        metavar="SESSION_ID",
+        help="resume an active session from the database",
+    )
+    args = parser.parse_args()
+
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise SystemExit("ANTHROPIC_API_KEY is required in the environment or .env")
 
-    workspace = Path(sys.argv[1]).expanduser().resolve()
+    workspace = Path(args.workspace).expanduser().resolve()
     if not workspace.is_dir():
-        raise SystemExit(f"Workspace does not exist: {workspace}")
+        parser.error(f"Workspace does not exist: {workspace}")
 
-    store = ConsoleStore(":memory:")
-    session = Session(title="Anthropic smoke session")
-    store.save_session(session)
-    store.append_event(Event(type="session.created", session_id=session.id))
+    database = Path(args.database).expanduser().resolve()
+    database.parent.mkdir(parents=True, exist_ok=True)
 
     registry = build_default_registry()
     agent = Agent(
@@ -106,54 +117,65 @@ def main() -> None:
         model=os.environ.get("CONVEYOR_MODEL"),
         tools=registry.names(),
     )
-    provider = AnthropicProvider()
-    context = ExecutionContext(workspace=workspace)
-
-    print(f"workspace: {workspace}")
-    print("commands: /messages, /events, /exit")
 
     try:
-        while True:
+        with Runtime(
+            store=ConsoleStore(database),
+            provider=AnthropicProvider(),
+            registry=registry,
+            workspace=workspace,
+        ) as runtime:
             try:
-                prompt = input("\nyou> ").strip()
-            except EOFError:
-                break
+                session = resolve_session(runtime, args.resume)
+            except ValueError as exc:
+                parser.error(str(exc))
 
-            if not prompt:
-                continue
-            if prompt in {"/exit", "/quit"}:
-                break
-            if prompt == "/messages":
-                print_messages(store, session)
-                continue
-            if prompt == "/events":
-                print_events(store, session)
-                continue
+            print(f"workspace: {workspace}")
+            print(f"database: {database}")
+            print(f"session: {session.id}")
+            print("commands: /messages, /events, /exit")
+            if args.resume:
+                print("\nhistory:")
+                print_messages(runtime.store, session)
 
-            save_user_message(store, session, prompt)
+            while True:
+                try:
+                    prompt = input("\nyou> ").strip()
+                except EOFError:
+                    break
 
-            try:
-                outcome = run_agent(
-                    agent=agent,
-                    session=session,
-                    provider=provider,
-                    registry=registry,
-                    context=context,
-                    store=store,
-                    approval_callback=prompt_for_approval,
-                )
-            except Exception as exc:
-                print(f"error> {exc}")
-                continue
+                if not prompt:
+                    continue
+                if prompt in {"/exit", "/quit"}:
+                    break
+                if prompt == "/messages":
+                    print_messages(runtime.store, session)
+                    continue
+                if prompt == "/events":
+                    print_events(runtime.store, session)
+                    continue
 
-            if outcome.final_message is not None:
-                print(f"\nassistant> {outcome.final_message.content}")
-            if outcome.run.status != "finished":
-                print(f"run> {outcome.run.status}: {outcome.run.error}")
+                title_before_turn = session.title
+                try:
+                    outcome = runtime.run_turn(
+                        agent=agent,
+                        session=session,
+                        content=prompt,
+                        approval_callback=prompt_for_approval,
+                    )
+                except Exception as exc:  # noqa: BLE001 - keep the REPL alive per turn
+                    print(f"error> {exc}")
+                    continue
+
+                if outcome.final_message is not None:
+                    print(f"\nassistant> {outcome.final_message.content}")
+                if session.title != title_before_turn:
+                    print(f"session title> {session.title}")
+                if outcome.run.status != "finished":
+                    print(f"run> {outcome.run.status}: {outcome.run.error}")
     except KeyboardInterrupt:
         print()
-    finally:
-        store.close()
 
 
-main()
+if __name__ == "__main__":
+    main()
