@@ -6,6 +6,22 @@ from typing import Any, Protocol
 from agent.models import ProviderMessage, ProviderResponse
 
 
+@dataclass(frozen=True, slots=True)
+class ModelLimits:
+    context_window_tokens: int
+    max_output_tokens: int
+
+    def __post_init__(self) -> None:
+        if self.context_window_tokens <= 0:
+            raise ValueError("context_window_tokens must be positive")
+        if self.max_output_tokens <= 0:
+            raise ValueError("max_output_tokens must be positive")
+        if self.max_output_tokens >= self.context_window_tokens:
+            raise ValueError(
+                "max_output_tokens must be smaller than the context window"
+            )
+
+
 @dataclass(slots=True)
 class ToolSchema:
     name: str
@@ -26,8 +42,8 @@ class ProviderRequest:
 class Provider(Protocol):
     name: str
 
-    def generate(self, request: ProviderRequest) -> ProviderResponse:
-        ...
+    def model_limits(self, model: str | None = None) -> ModelLimits: ...
 
-    def close(self) -> None:
-        ...
+    def generate(self, request: ProviderRequest) -> ProviderResponse: ...
+
+    def close(self) -> None: ...

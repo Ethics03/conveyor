@@ -12,6 +12,8 @@ MessageRole = Literal["user", "assistant", "system", "tool"]
 EventType = Literal[
     "session.created",
     "message.created",
+    "context.compaction_planned",
+    "context.compacted",
     "run.started",
     "run.blocked",
     "run.resumed",
@@ -134,6 +136,38 @@ class ProviderMessage:
     tool_calls: list[ToolCall] = field(default_factory=list)
     tool_call_id: str | None = None
     is_error: bool = False
+    replay_state: ProviderReplayState | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderReplayState:
+    """Opaque provider-owned items needed to continue a conversation."""
+
+    provider: str
+    items: tuple[dict[str, object], ...]
+
+    def to_metadata(self) -> dict[str, object]:
+        return {
+            "provider": self.provider,
+            "items": [dict(item) for item in self.items],
+        }
+
+    @classmethod
+    def from_metadata(cls, value: object) -> ProviderReplayState | None:
+        if not isinstance(value, dict):
+            return None
+
+        provider = value.get("provider")
+        raw_items = value.get("items")
+        if not isinstance(provider, str) or not isinstance(raw_items, list):
+            return None
+
+        items: list[dict[str, object]] = []
+        for raw_item in raw_items:
+            if not isinstance(raw_item, dict):
+                return None
+            items.append(dict(raw_item))
+        return cls(provider=provider, items=tuple(items))
 
 
 @dataclass(slots=True)
@@ -142,6 +176,7 @@ class ProviderResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
     finish_reason: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+    replay_state: ProviderReplayState | None = None
 
     @classmethod
     def message(
