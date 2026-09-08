@@ -7,6 +7,7 @@ from threading import Event as ThreadEvent
 import pytest
 
 from agent.approvals import DefaultApprovalPolicy, PolicyDecision, ToolCallDecision
+from agent.context import MIN_CLEARABLE_TOOL_RESULT_CHARS
 from agent.loop import (
     _block_run,
     _preflight_tool_calls,
@@ -18,11 +19,12 @@ from agent.models import (
     ApprovalDecision,
     ApprovalRequest,
     Message,
+    ProviderReplayState,
     ProviderResponse,
     Session,
     ToolCall,
 )
-from providers.base import ProviderRequest
+from providers.base import ModelLimits, ProviderRequest
 from providers.fake import FakeProvider
 from storage.store import Store
 from tools.base import ExecutionContext, tool
@@ -182,6 +184,118 @@ def test_run_agent_finishes_with_plain_response(tmp_path) -> None:
         "message.created",
         "run.finished",
     ]
+
+
+def test_run_agent_sends_compacted_context_and_records_telemetry(tmp_path) -> None:
+    store = Store(":memory:")
+    session = Session()
+    store.save_session(session)
+    old_call = ToolCall(id="call_old", name="read_file")
+    old_payload = "x" * (MIN_CLEARABLE_TOOL_RESULT_CHARS * 10)
+    history = [
+        Message(session_id=session.id, role="user", content="Old turn"),
+        Message(
+            session_id=session.id,
+            role="assistant",
+            tool_calls=[old_call],
+        ),
+        Message(
+            session_id=session.id,
+            role="tool",
+            name="read_file",
+            tool_call_id=old_call.id,
+            content=old_payload,
+        ),
+        Message(session_id=session.id, role="assistant", content="Old answer"),
+        Message(session_id=session.id, role="user", content="Recent turn one"),
+        Message(session_id=session.id, role="assistant", content="Recent answer"),
+        Message(session_id=session.id, role="user", content="Recent turn two"),
+    ]
+    for message in history:
+        store.save_message(message)
+
+    provider = FakeProvider(
+        [ProviderResponse.message("Done with compacted context.")],
+        model_limits=ModelLimits(12_000, 1_000),
+    )
+    outcome = run_agent(
+        agent=Agent(),
+        session=session,
+        provider=provider,
+        registry=ToolRegistry(),
+        context=ExecutionContext(workspace=tmp_path),
+        store=store,
+    )
+
+    request = provider.requests[0]
+    compacted_result = next(
+        message for message in request.messages if message.tool_call_id == old_call.id
+    )
+    telemetry = request.metadata["context_plan"]
+    assert "result omitted from active context" in compacted_result.content
+    assert telemetry["compaction_triggered"] is True
+    assert telemetry["cleared_tool_results"] == 1
+    assert telemetry["summary_required"] is False
+    assert telemetry["input_tokens_after"] < telemetry["input_tokens_before"]
+    assert request.max_tokens == 1_000
+    assert store.list_messages(session.id)[2].content == old_payload
+    assert [event.type for event in store.list_events(run_id=outcome.run.id)] == [
+        "run.started",
+        "context.compaction_planned",
+        "message.created",
+        "run.finished",
+    ]
+
+
+def test_run_agent_persists_native_compaction_checkpoint(tmp_path) -> None:
+    store = Store(":memory:")
+    session = _session_with_user_message(store)
+    state = ProviderReplayState(
+        provider="anthropic",
+        items=(
+            {
+                "type": "compaction",
+                "content": "<summary>Current task state.</summary>",
+                "encrypted_content": "opaque-checkpoint",
+            },
+        ),
+    )
+    provider = FakeProvider(
+        [
+            ProviderResponse(
+                content="Continued.",
+                finish_reason="end_turn",
+                replay_state=state,
+            )
+        ]
+    )
+
+    outcome = run_agent(
+        agent=Agent(),
+        session=session,
+        provider=provider,
+        registry=ToolRegistry(),
+        context=ExecutionContext(workspace=tmp_path),
+        store=store,
+    )
+
+    assert outcome.final_message is not None
+    assert outcome.final_message.metadata["provider_replay_state"] == (
+        state.to_metadata()
+    )
+    reopened = store.list_messages(session.id)
+    assert reopened[-1].metadata["provider_replay_state"] == state.to_metadata()
+    events = store.list_events(run_id=outcome.run.id)
+    assert [event.type for event in events] == [
+        "run.started",
+        "message.created",
+        "context.compacted",
+        "run.finished",
+    ]
+    assert events[2].payload == {
+        "provider": "anthropic",
+        "item_count": 1,
+    }
 
 
 def test_run_agent_can_use_main_thread_store_from_worker(tmp_path) -> None:
@@ -755,6 +869,9 @@ def test_run_agent_fails_at_iteration_limit(tmp_path) -> None:
 def test_run_agent_persists_provider_failure(tmp_path) -> None:
     class FailingProvider:
         name = "failing"
+
+        def model_limits(self, model: str | None = None) -> ModelLimits:
+            return ModelLimits(200_000, 4_096)
 
         def generate(self, request: ProviderRequest) -> ProviderResponse:
             raise RuntimeError("provider unavailable")
