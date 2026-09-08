@@ -9,7 +9,7 @@ from agent.approvals import (
     PolicyDecision,
     ToolCallDecision,
 )
-from agent.context import build_provider_messages
+from agent.context import ContextBudget, ContextPlan, plan_context
 from agent.models import (
     Agent,
     ApprovalRequest,
@@ -60,24 +60,62 @@ def _start_run(
     return run
 
 
-def _build_provider_request(
+def _plan_provider_request(
     *,
     agent: Agent,
     session: Session,
     run: Run,
     messages: list[Message],
     registry: ToolRegistry,
+    provider: Provider,
+    store: Store,
+    iteration: int,
 ) -> ProviderRequest:
-    return ProviderRequest(
-        messages=build_provider_messages(
-            agent,
-            messages,
-            session=session,
-            run=run,
-        ),
-        tools=registry.schemas(),
-        model=agent.model,
+    limits = provider.model_limits(agent.model)
+    budget = ContextBudget(
+        context_window_tokens=limits.context_window_tokens,
+        max_output_tokens=limits.max_output_tokens,
     )
+    plan = plan_context(
+        agent=agent,
+        messages=messages,
+        tools=registry.schemas(),
+        budget=budget,
+        session=session,
+        run=run,
+    )
+    telemetry = _context_plan_telemetry(plan, budget=budget, iteration=iteration)
+    plan.request.metadata["context_plan"] = telemetry
+
+    if plan.compaction_triggered:
+        store.append_event(
+            Event(
+                type="context.compaction_planned",
+                session_id=session.id,
+                run_id=run.id,
+                payload=telemetry,
+            )
+        )
+    return plan.request
+
+
+def _context_plan_telemetry(
+    plan: ContextPlan,
+    *,
+    budget: ContextBudget,
+    iteration: int,
+) -> dict[str, object]:
+    return {
+        "iteration": iteration,
+        "input_tokens_before": plan.before.input_tokens,
+        "input_tokens_after": plan.after.input_tokens,
+        "token_count_source": plan.after.source,
+        "trigger_tokens": budget.trigger_tokens,
+        "target_tokens": budget.target_tokens,
+        "compaction_triggered": plan.compaction_triggered,
+        "cleared_tool_results": plan.cleared_tool_results,
+        "summary_required": plan.summary_required,
+    }
 
 
 def _save_assistant_message(
@@ -90,6 +128,8 @@ def _save_assistant_message(
     metadata = dict(response.raw)
     if response.finish_reason is not None:
         metadata["finish_reason"] = response.finish_reason
+    if response.replay_state is not None:
+        metadata["provider_replay_state"] = response.replay_state.to_metadata()
 
     message = Message(
         session_id=session.id,
@@ -113,6 +153,23 @@ def _save_assistant_message(
             },
         )
     )
+    if response.replay_state is not None:
+        compaction_items = sum(
+            item.get("type") == "compaction" for item in response.replay_state.items
+        )
+        if compaction_items:
+            store.append_event(
+                Event(
+                    type="context.compacted",
+                    session_id=session.id,
+                    run_id=run.id,
+                    message_id=message.id,
+                    payload={
+                        "provider": response.replay_state.provider,
+                        "item_count": compaction_items,
+                    },
+                )
+            )
     return message
 
 
@@ -624,12 +681,15 @@ def run_agent(
 
     try:
         for iterations in range(1, max_iterations + 1):
-            request = _build_provider_request(
+            request = _plan_provider_request(
                 agent=agent,
                 session=session,
                 run=run,
                 messages=messages,
                 registry=allowed_registry,
+                provider=provider,
+                store=store,
+                iteration=iterations,
             )
             response = provider.generate(request)
 

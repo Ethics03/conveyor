@@ -5,7 +5,14 @@ from dataclasses import asdict, dataclass, replace
 from math import isfinite
 from typing import Literal
 
-from agent.models import Agent, Message, ProviderMessage, Run, Session
+from agent.models import (
+    Agent,
+    Message,
+    ProviderMessage,
+    ProviderReplayState,
+    Run,
+    Session,
+)
 from providers.base import ProviderRequest, ToolSchema
 
 PROTECTED_RECENT_TURNS = 2
@@ -36,9 +43,13 @@ class ContextBudget:
             and isfinite(self.trigger_ratio)
             and 0 < self.target_ratio < self.trigger_ratio <= 1
         ):
-            raise ValueError("Ratios must satisfy 0 < target_ratio < trigger_ratio <= 1")
+            raise ValueError(
+                "Ratios must satisfy 0 < target_ratio < trigger_ratio <= 1"
+            )
         if not 0 < self.target_tokens < self.trigger_tokens:
-            raise ValueError("Budget is too small for distinct target and trigger tokens")
+            raise ValueError(
+                "Budget is too small for distinct target and trigger tokens"
+            )
 
     @property
     def input_limit_tokens(self) -> int:
@@ -164,7 +175,10 @@ def _estimate_json_tokens(value: object) -> int:
     # Include structured fields and UTF-8 bytes; this is still a heuristic,
     # not an upper bound on any provider's tokenizer or wire-format overhead.
     serialized = json.dumps(
-        value, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
     )
     return (len(serialized.encode("utf-8")) + 3) // 4
 
@@ -199,9 +213,9 @@ def _to_provider_message(message: Message) -> ProviderMessage:
         name=message.name,
         tool_calls=list(message.tool_calls),
         tool_call_id=message.tool_call_id,
-        is_error=(
-            message.role == "tool"
-            and message.metadata.get("ok") is False
+        is_error=(message.role == "tool" and message.metadata.get("ok") is False),
+        replay_state=ProviderReplayState.from_metadata(
+            message.metadata.get("provider_replay_state")
         ),
     )
 
@@ -238,10 +252,7 @@ def build_provider_messages(
             )
         )
 
-    provider_messages.extend(
-        _to_provider_message(message)
-        for message in messages
-    )
+    provider_messages.extend(_to_provider_message(message) for message in messages)
     return provider_messages
 
 

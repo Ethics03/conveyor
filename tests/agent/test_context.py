@@ -17,7 +17,15 @@ from agent.context import (
     group_conversation_turns,
     plan_context,
 )
-from agent.models import Agent, Message, ProviderMessage, Run, Session, ToolCall
+from agent.models import (
+    Agent,
+    Message,
+    ProviderMessage,
+    ProviderReplayState,
+    Run,
+    Session,
+    ToolCall,
+)
 from providers.base import ProviderRequest, ToolSchema
 
 
@@ -351,7 +359,9 @@ def test_estimate_request_usage_includes_system_history_and_tool_schemas() -> No
 
 def test_estimate_request_usage_accounts_for_tool_arguments_and_new_results() -> None:
     call = ToolCall(
-        id="call_write", name="write_file", arguments={"content": "x" * 20_000},
+        id="call_write",
+        name="write_file",
+        arguments={"content": "x" * 20_000},
     )
     request = ProviderRequest(
         messages=[ProviderMessage(role="assistant", content="", tool_calls=[call])],
@@ -361,7 +371,10 @@ def test_estimate_request_usage_accounts_for_tool_arguments_and_new_results() ->
 
     request.messages.append(
         ProviderMessage(
-            role="tool", content="y" * 20_000, tool_call_id=call.id, is_error=True,
+            role="tool",
+            content="y" * 20_000,
+            tool_call_id=call.id,
+            is_error=True,
         )
     )
     snapshot = deepcopy(request)
@@ -503,5 +516,31 @@ def test_build_provider_messages_marks_failed_tool_results() -> None:
             content="Tool execution failed",
             tool_call_id="call_failed",
             is_error=True,
+        )
+    ]
+
+
+def test_build_provider_messages_restores_provider_replay_state() -> None:
+    state = ProviderReplayState(
+        provider="anthropic",
+        items=(
+            {
+                "type": "compaction",
+                "content": "<summary>Earlier work.</summary>",
+                "encrypted_content": "opaque-checkpoint",
+            },
+        ),
+    )
+    message = Message(
+        role="assistant",
+        content="Continuing.",
+        metadata={"provider_replay_state": state.to_metadata()},
+    )
+
+    assert build_provider_messages(Agent(), [message]) == [
+        ProviderMessage(
+            role="assistant",
+            content="Continuing.",
+            replay_state=state,
         )
     ]
