@@ -59,9 +59,9 @@ class AnthropicProvider:
 
     def __post_init__(self) -> None:
         if self.compaction_trigger_tokens < MIN_ANTHROPIC_COMPACTION_TRIGGER_TOKENS:
+            minimum = MIN_ANTHROPIC_COMPACTION_TRIGGER_TOKENS
             raise ValueError(
-                "compaction_trigger_tokens must be at least "
-                f"{MIN_ANTHROPIC_COMPACTION_TRIGGER_TOKENS}"
+                f"compaction_trigger_tokens must be at least {minimum}"
             )
         self._client = Anthropic(api_key=self.api_key) if self.api_key else Anthropic()
 
