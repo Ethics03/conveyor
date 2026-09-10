@@ -432,10 +432,15 @@ def test_build_provider_messages_includes_temporal_context() -> None:
         session_id=session.id,
         created_at=datetime(2026, 8, 10, 8, 5, tzinfo=UTC),
     )
+    user_message = Message(
+        role="user",
+        content="What happened?",
+        created_at=datetime(2026, 8, 10, 8, 4, tzinfo=UTC),
+    )
 
     provider_messages = build_provider_messages(
         Agent(),
-        [Message(role="user", content="What happened?")],
+        [user_message],
         session=session,
         run=run,
     )
@@ -445,17 +450,67 @@ def test_build_provider_messages_includes_temporal_context() -> None:
             role="system",
             content=(
                 "Temporal context (UTC):\n"
-                "- Session created at: 2026-08-10T08:00:00+00:00\n"
-                "- Current run started at: 2026-08-10T08:05:00+00:00"
+                "- Session created at: 2026-08-10T08:00:00+00:00"
             ),
         ),
-        ProviderMessage(role="user", content="What happened?"),
+        ProviderMessage(
+            role="user",
+            content=(
+                "Message timestamp (UTC): 2026-08-10T08:04:00+00:00\n\nWhat happened?"
+            ),
+        ),
     ]
+
+
+def test_build_provider_messages_keeps_temporal_prefix_stable_across_runs() -> None:
+    session = Session(
+        created_at=datetime(2026, 8, 10, 8, 0, tzinfo=UTC),
+    )
+    messages = [
+        Message(
+            role="user",
+            content="Continue.",
+            created_at=datetime(2026, 8, 10, 8, 4, tzinfo=UTC),
+        )
+    ]
+
+    first = build_provider_messages(
+        Agent(),
+        messages,
+        session=session,
+        run=Run(
+            session_id=session.id,
+            created_at=datetime(2026, 8, 10, 8, 5, tzinfo=UTC),
+        ),
+    )
+    second = build_provider_messages(
+        Agent(),
+        messages,
+        session=session,
+        run=Run(
+            session_id=session.id,
+            created_at=datetime(2026, 8, 10, 9, 0, tzinfo=UTC),
+        ),
+    )
+
+    assert first == second
 
 
 def test_build_provider_messages_rejects_partial_temporal_context() -> None:
     with pytest.raises(ValueError, match="must be provided together"):
         _ = build_provider_messages(Agent(), [], session=Session())
+
+
+def test_build_provider_messages_rejects_run_from_another_session() -> None:
+    session = Session()
+
+    with pytest.raises(ValueError, match="does not belong"):
+        _ = build_provider_messages(
+            Agent(),
+            [],
+            session=session,
+            run=Run(session_id=Session().id),
+        )
 
 
 def test_build_provider_messages_preserves_tool_call_relationships() -> None:
