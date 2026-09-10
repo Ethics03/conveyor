@@ -96,6 +96,64 @@ def test_anthropic_provider_reports_request_budget_limits(
     assert provider.model_limits() == ModelLimits(100_000, 8_000)
 
 
+def test_anthropic_provider_enables_automatic_prompt_caching_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    anthropic_response = SimpleNamespace(
+        id="msg_test",
+        model="claude-sonnet-4-6",
+        content=[SimpleNamespace(type="text", text="Done.")],
+        stop_reason="end_turn",
+        usage=Usage(input_tokens=10, output_tokens=2),
+    )
+
+    class FakeMessages:
+        def create(self, **params: object) -> object:
+            captured.update(params)
+            return anthropic_response
+
+    class FakeAnthropic:
+        def __init__(self, **params: object) -> None:
+            self.beta = SimpleNamespace(messages=FakeMessages())
+
+    monkeypatch.setattr("providers.anthropic_provider.Anthropic", FakeAnthropic)
+    AnthropicProvider(api_key="test-key").generate(
+        ProviderRequest(messages=[ProviderMessage(role="user", content="Continue")])
+    )
+
+    assert captured["cache_control"] == {"type": "ephemeral"}
+
+
+def test_anthropic_provider_can_disable_automatic_prompt_caching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    anthropic_response = SimpleNamespace(
+        id="msg_test",
+        model="claude-sonnet-4-6",
+        content=[SimpleNamespace(type="text", text="Done.")],
+        stop_reason="end_turn",
+        usage=Usage(input_tokens=10, output_tokens=2),
+    )
+
+    class FakeMessages:
+        def create(self, **params: object) -> object:
+            captured.update(params)
+            return anthropic_response
+
+    class FakeAnthropic:
+        def __init__(self, **params: object) -> None:
+            self.beta = SimpleNamespace(messages=FakeMessages())
+
+    monkeypatch.setattr("providers.anthropic_provider.Anthropic", FakeAnthropic)
+    AnthropicProvider(api_key="test-key", prompt_caching=False).generate(
+        ProviderRequest(messages=[ProviderMessage(role="user", content="Continue")])
+    )
+
+    assert captured["cache_control"] is omit
+
+
 def test_anthropic_messages_preserve_tool_call_relationships() -> None:
     messages = [
         ProviderMessage(role="user", content="Read both files."),
@@ -349,6 +407,7 @@ def test_anthropic_provider_enables_native_compaction_before_local_fallback(
         )
     )
 
+    assert captured["cache_control"] == {"type": "ephemeral"}
     assert captured["betas"] == [ANTHROPIC_COMPACTION_BETA]
     assert captured["context_management"] == {
         "edits": [

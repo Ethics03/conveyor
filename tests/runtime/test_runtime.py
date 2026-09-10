@@ -95,7 +95,10 @@ def test_run_turn_persists_input_and_executes_agent(tmp_path: Path) -> None:
             "run.finished",
         ]
         assert events[0].message_id == messages[0].id
-        assert provider.requests[-1].messages[-1].content == "  Keep this spacing.  "
+        assert provider.requests[-1].messages[-1].content == (
+            f"Message timestamp (UTC): {messages[0].created_at.isoformat()}\n\n"
+            "  Keep this spacing.  "
+        )
         assert len(provider.requests) == 1
 
 

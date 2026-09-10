@@ -206,10 +206,21 @@ def estimate_request_usage(request: ProviderRequest) -> ContextUsage:
     )
 
 
-def _to_provider_message(message: Message) -> ProviderMessage:
+def _to_provider_message(
+    message: Message,
+    *,
+    include_timestamp: bool = False,
+) -> ProviderMessage:
+    content = message.content
+    if include_timestamp and message.role == "user":
+        content = (
+            f"Message timestamp (UTC): {message.created_at.isoformat()}\n\n"
+            f"{message.content}"
+        )
+
     return ProviderMessage(
         role=message.role,
-        content=message.content,
+        content=content,
         name=message.name,
         tool_calls=list(message.tool_calls),
         tool_call_id=message.tool_call_id,
@@ -241,18 +252,22 @@ def build_provider_messages(
         )
 
     if session is not None and run is not None:
+        if run.session_id != session.id:
+            raise ValueError("Run does not belong to the provided session")
         provider_messages.append(
             ProviderMessage(
                 role="system",
                 content=(
                     "Temporal context (UTC):\n"
-                    f"- Session created at: {session.created_at.isoformat()}\n"
-                    f"- Current run started at: {run.created_at.isoformat()}"
+                    f"- Session created at: {session.created_at.isoformat()}"
                 ),
             )
         )
 
-    provider_messages.extend(_to_provider_message(message) for message in messages)
+    provider_messages.extend(
+        _to_provider_message(message, include_timestamp=session is not None)
+        for message in messages
+    )
     return provider_messages
 
 
