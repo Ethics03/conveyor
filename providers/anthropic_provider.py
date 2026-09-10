@@ -52,6 +52,7 @@ class AnthropicProvider:
     name: str = "anthropic"
     context_window_tokens: int = DEFAULT_ANTHROPIC_CONTEXT_WINDOW_TOKENS
     max_output_tokens: int = DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS
+    prompt_caching: bool = True
     native_compaction: bool = True
     compaction_trigger_tokens: int = DEFAULT_ANTHROPIC_COMPACTION_TRIGGER_TOKENS
     _client: Anthropic = field(init=False, repr=False, compare=False)
@@ -92,6 +93,7 @@ class AnthropicProvider:
             ),
             system=system if system else omit,
             tools=tools if tools else omit,
+            cache_control={"type": "ephemeral"} if self.prompt_caching else omit,
             betas=[ANTHROPIC_COMPACTION_BETA] if compaction_edit else omit,
             context_management=(
                 {"edits": [compaction_edit]} if compaction_edit is not None else omit
