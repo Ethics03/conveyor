@@ -18,6 +18,7 @@ from agent.models import (
     Agent,
     ApprovalDecision,
     ApprovalRequest,
+    FinishReason,
     Message,
     ProviderReplayState,
     ProviderResponse,
@@ -186,6 +187,47 @@ def test_run_agent_finishes_with_plain_response(tmp_path) -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("finish_reason", "expected_error"),
+    [
+        ("max_tokens", "Provider response stopped at a token limit"),
+        ("refusal", "Provider refused the request"),
+        ("pause", "Provider paused without a resumable tool call"),
+        ("unknown", "Provider returned an unknown finish reason"),
+        ("tool_use", "Provider returned tool_use without any tool calls"),
+    ],
+)
+def test_run_agent_fails_on_incomplete_provider_response(
+    tmp_path,
+    finish_reason: FinishReason,
+    expected_error: str,
+) -> None:
+    store = Store(":memory:")
+    session = _session_with_user_message(store)
+    provider = FakeProvider(
+        [ProviderResponse.message("Partial response", finish_reason=finish_reason)]
+    )
+
+    outcome = run_agent(
+        agent=Agent(),
+        session=session,
+        provider=provider,
+        registry=ToolRegistry(),
+        context=ExecutionContext(workspace=tmp_path),
+        store=store,
+    )
+
+    assert outcome.run.status == "failed"
+    assert outcome.run.error == expected_error
+    assert outcome.final_message is not None
+    assert outcome.final_message.content == "Partial response"
+    assert [event.type for event in store.list_events(run_id=outcome.run.id)] == [
+        "run.started",
+        "message.created",
+        "run.failed",
+    ]
+
+
 def test_run_agent_sends_compacted_context_and_records_telemetry(tmp_path) -> None:
     store = Store(":memory:")
     session = Session()
@@ -264,7 +306,7 @@ def test_run_agent_persists_native_compaction_checkpoint(tmp_path) -> None:
         [
             ProviderResponse(
                 content="Continued.",
-                finish_reason="end_turn",
+                finish_reason="stop",
                 replay_state=state,
             )
         ]
@@ -397,7 +439,8 @@ def test_run_agent_executes_parallel_safe_tools_concurrently_in_call_order(
                 tool_calls=[
                     ToolCall(id="call_first", name="first"),
                     ToolCall(id="call_second", name="second"),
-                ]
+                ],
+                finish_reason="tool_use",
             ),
             ProviderResponse.message("Both reads complete."),
         ]
@@ -475,7 +518,8 @@ def test_run_agent_uses_non_parallel_tool_as_batch_barrier(tmp_path) -> None:
                     ToolCall(id="call_ordered", name="ordered_step"),
                     ToolCall(id="call_after_one", name="after_one"),
                     ToolCall(id="call_after_two", name="after_two"),
-                ]
+                ],
+                finish_reason="tool_use",
             ),
             ProviderResponse.message("Ordered work complete."),
         ]
@@ -527,7 +571,8 @@ def test_run_agent_preserves_other_parallel_results_when_one_tool_fails(
                 tool_calls=[
                     ToolCall(id="call_failure", name="failing_read"),
                     ToolCall(id="call_success", name="successful_read"),
-                ]
+                ],
+                finish_reason="tool_use",
             ),
             ProviderResponse.message("Handled partial results."),
         ]
@@ -574,7 +619,8 @@ def test_run_agent_waits_for_approval_and_continues(tmp_path) -> None:
                 tool_calls=[
                     ToolCall(id="call_read", name="inspect_workspace"),
                     ToolCall(id="call_write", name="update_workspace"),
-                ]
+                ],
+                finish_reason="tool_use",
             ),
             ProviderResponse.message("Updates complete."),
         ]
@@ -728,7 +774,8 @@ def test_run_agent_cleans_up_approvals_when_callback_fails(tmp_path) -> None:
                 tool_calls=[
                     ToolCall(id="call_first", name="update_first"),
                     ToolCall(id="call_second", name="update_second"),
-                ]
+                ],
+                finish_reason="tool_use",
             ),
         ]
     )

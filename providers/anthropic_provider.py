@@ -15,6 +15,7 @@ from anthropic.types.beta import (
 )
 
 from agent.models import (
+    FinishReason,
     ProviderMessage,
     ProviderReplayState,
     ProviderResponse,
@@ -43,6 +44,22 @@ _COMPACTION_MODEL_MARKERS = (
     "claude-sonnet-4-6",
     "claude-sonnet-5",
 )
+
+_ANTHROPIC_FINISH_REASONS: dict[str, FinishReason] = {
+    "end_turn": "stop",
+    "stop_sequence": "stop",
+    "tool_use": "tool_use",
+    "max_tokens": "max_tokens",
+    "model_context_window_exceeded": "max_tokens",
+    "refusal": "refusal",
+    "pause_turn": "pause",
+}
+
+
+def _normalize_finish_reason(reason: str | None) -> FinishReason:
+    if reason is None:
+        return "unknown"
+    return _ANTHROPIC_FINISH_REASONS.get(reason, "unknown")
 
 
 @dataclass(slots=True)
@@ -135,7 +152,7 @@ class AnthropicProvider:
         return ProviderResponse(
             content="\n".join(text_parts).strip(),
             tool_calls=tool_calls,
-            finish_reason=response.stop_reason,
+            finish_reason=_normalize_finish_reason(response.stop_reason),
             raw={
                 "provider": self.name,
                 "model": response.model,

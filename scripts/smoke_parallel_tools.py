@@ -75,7 +75,8 @@ def main() -> None:
                 tool_calls=[
                     ToolCall(id="call_alpha", name="read_alpha"),
                     ToolCall(id="call_beta", name="read_beta"),
-                ]
+                ],
+                finish_reason="tool_use",
             ),
             ProviderResponse.message("Both reads completed."),
         ]

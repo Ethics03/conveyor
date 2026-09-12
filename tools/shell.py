@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import os
-import signal
 import subprocess
 import threading
-import time
 from collections import deque
 from math import isfinite
 from pathlib import Path
@@ -12,6 +10,7 @@ from shutil import which
 from typing import TextIO
 
 from tools.base import ExecutionContext, JsonObject, tool
+from tools.process import terminate_process
 from tools.workspace import (
     WorkspacePathError,
     WorkspaceToolError,
@@ -123,47 +122,6 @@ def _drain_output(stream: TextIO, output: _BoundedOutput) -> None:
         pass
 
 
-def _terminate_process(process: subprocess.Popen[str]) -> None:
-    if os.name != "posix":
-        if process.poll() is None:
-            process.terminate()
-            try:
-                _ = process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                process.kill()
-        return
-
-    process_group = process.pid
-    try:
-        os.killpg(process_group, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-
-    deadline = time.monotonic() + 1
-    while time.monotonic() < deadline:
-        if process.poll() is None:
-            try:
-                _ = process.wait(timeout=0.05)
-            except subprocess.TimeoutExpired:
-                pass
-        try:
-            os.killpg(process_group, 0)
-        except ProcessLookupError:
-            return
-        time.sleep(0.05)
-
-    try:
-        os.killpg(process_group, signal.SIGKILL)
-    except ProcessLookupError:
-        return
-
-    try:
-        _ = process.wait(timeout=1)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        _ = process.wait(timeout=1)
-
-
 def _relative_cwd(workspace: Path, cwd: Path) -> str:
     relative = cwd.relative_to(workspace)
     return relative.as_posix() if relative.parts else "."
@@ -208,7 +166,7 @@ def bash(
         start_new_session=True,
     )
     if process.stdout is None or process.stderr is None:
-        _terminate_process(process)
+        terminate_process(process)
         raise WorkspaceToolError("Command output pipes were not created")
 
     stdout_output = _BoundedOutput(MAX_COMMAND_OUTPUT_CHARS)
@@ -231,13 +189,13 @@ def bash(
         _ = process.wait(timeout=normalized_timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
-        _terminate_process(process)
+        terminate_process(process)
     except BaseException:
-        _terminate_process(process)
+        terminate_process(process)
         raise
     else:
         # A foreground command must not leave background descendants running.
-        _terminate_process(process)
+        terminate_process(process)
 
     stdout_thread.join(timeout=2)
     stderr_thread.join(timeout=2)

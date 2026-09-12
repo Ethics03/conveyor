@@ -27,6 +27,14 @@ EventType = Literal[
 ApprovalStatus = Literal["pending", "approved", "denied"]
 ApprovalDecision = Literal["approved", "denied"]
 ToolPermission = Literal["read", "write", "dangerous"]
+FinishReason = Literal[
+    "stop",
+    "tool_use",
+    "max_tokens",
+    "refusal",
+    "pause",
+    "unknown",
+]
 
 
 def new_id(prefix: str) -> str:
@@ -174,7 +182,7 @@ class ProviderReplayState:
 class ProviderResponse:
     content: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
-    finish_reason: str | None = None
+    finish_reason: FinishReason = "stop"
     raw: dict[str, Any] = field(default_factory=dict)
     replay_state: ProviderReplayState | None = None
 
@@ -183,7 +191,7 @@ class ProviderResponse:
         cls,
         content: str,
         raw: dict[str, Any] | None = None,
-        finish_reason: str | None = "stop",
+        finish_reason: FinishReason = "stop",
     ) -> ProviderResponse:
         return cls(content=content, finish_reason=finish_reason, raw=raw or {})
 
@@ -196,7 +204,7 @@ class ProviderResponse:
         *,
         tool_call_id: str | None = None,
         content: str = "",
-        finish_reason: str | None = "tool_use",
+        finish_reason: FinishReason = "tool_use",
     ) -> ProviderResponse:
         tool_call = ToolCall(name=name, arguments=arguments)
         if tool_call_id is not None:

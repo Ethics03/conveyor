@@ -8,7 +8,11 @@ from agent.models import ToolCall
 from tools.base import ExecutionContext
 from tools.registry import ToolRegistry
 from tools.workspace import (
+    MAX_READ_FILE_CHARS,
+    MAX_READ_LINE_CHARS,
+    MAX_SEARCH_MATCH_CHARS,
     WorkspacePathError,
+    WorkspaceToolError,
     read_file,
     read_many,
     relative_workspace_path,
@@ -103,6 +107,7 @@ def test_read_file_returns_numbered_lines_with_metadata(tmp_path) -> None:
         "offset": 1,
         "limit": 500,
         "total_lines": 3,
+        "total_lines_is_exact": True,
         "truncated": False,
     }
 
@@ -120,7 +125,56 @@ def test_read_file_supports_line_pagination(tmp_path) -> None:
     assert result["offset"] == 2
     assert result["limit"] == 2
     assert result["total_lines"] == 4
+    assert result["total_lines_is_exact"] is False
+    assert result["next_offset"] == 4
     assert result["truncated"] is True
+
+
+def test_read_file_bounds_a_single_long_line(tmp_path) -> None:
+    path = tmp_path / "minified.txt"
+    path.write_text("x" * (MAX_READ_FILE_CHARS + 100) + "\nsecond\n", encoding="utf-8")
+
+    result = read_file.execute(
+        {"path": "minified.txt"},
+        ExecutionContext(workspace=tmp_path),
+    )
+
+    first_line = result["content"].splitlines()[0]
+    assert first_line.startswith("1|")
+    assert len(first_line) > MAX_READ_LINE_CHARS
+    assert len(first_line) < MAX_READ_FILE_CHARS
+    assert first_line.endswith("... [truncated]")
+    assert result["total_lines"] == 2
+    assert result["total_lines_is_exact"] is True
+    assert result["line_truncated"] is True
+    assert result["truncated"] is True
+
+
+def test_read_file_stops_after_page_lookahead(tmp_path) -> None:
+    path = tmp_path / "notes.txt"
+    path.write_text("one\ntwo\nthree\nfour\nfive\n", encoding="utf-8")
+
+    result = read_file.execute(
+        {"path": "notes.txt", "limit": 2},
+        ExecutionContext(workspace=tmp_path),
+    )
+
+    assert result["content"] == "1|one\n2|two"
+    assert result["total_lines"] == 3
+    assert result["total_lines_is_exact"] is False
+    assert result["next_offset"] == 3
+    assert result["hint"] == "Continue with offset=3."
+
+
+def test_read_file_rejects_offset_past_end(tmp_path) -> None:
+    path = tmp_path / "notes.txt"
+    path.write_text("one\ntwo\n", encoding="utf-8")
+
+    with pytest.raises(WorkspaceToolError, match="Offset 3 exceeds.*2 lines"):
+        read_file.execute(
+            {"path": "notes.txt", "offset": 3},
+            ExecutionContext(workspace=tmp_path),
+        )
 
 
 def test_read_file_rejects_paths_outside_workspace(tmp_path) -> None:
@@ -151,17 +205,19 @@ def test_read_many_returns_multiple_files(tmp_path) -> None:
             "path": "a.txt",
             "content": "1|alpha",
             "offset": 1,
-            "limit": 500,
-            "total_lines": 1,
-            "truncated": False,
+                "limit": 500,
+                "total_lines": 1,
+                "total_lines_is_exact": True,
+                "truncated": False,
         },
         {
             "path": "b.txt",
             "content": "1|beta",
             "offset": 1,
-            "limit": 500,
-            "total_lines": 1,
-            "truncated": False,
+                "limit": 500,
+                "total_lines": 1,
+                "total_lines_is_exact": True,
+                "truncated": False,
         },
     ]
     assert result["errors"] == []
@@ -286,6 +342,7 @@ def test_search_files_discovers_files_by_name(tmp_path) -> None:
     assert result["files"] == ["agent/models.py"]
     assert result["target"] == "files"
     assert result["total_count"] == 1
+    assert result["total_count_is_exact"] is True
     assert result["truncated"] is False
 
 
@@ -306,6 +363,7 @@ def test_search_files_supports_path_and_pagination(tmp_path) -> None:
 
     assert result["files"] == ["src/a.py"]
     assert result["total_count"] == 2
+    assert result["total_count_is_exact"] is False
     assert result["truncated"] is True
 
 
@@ -343,6 +401,7 @@ def test_search_files_finds_content_matches(tmp_path) -> None:
         {"path": "tools/registry.py", "line": 1, "text": "class ToolRegistry:"}
     ]
     assert result["total_count"] == 1
+    assert result["total_count_is_exact"] is True
     assert result["truncated"] is False
 
 
@@ -363,4 +422,52 @@ def test_search_files_content_supports_path_and_pagination(tmp_path) -> None:
 
     assert result["matches"] == [{"path": "src/a.py", "line": 1, "text": "needle one"}]
     assert result["total_count"] == 2
+    assert result["total_count_is_exact"] is False
     assert result["truncated"] is True
+
+
+def test_search_files_stops_after_page_lookahead(tmp_path) -> None:
+    if which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+
+    for name in ("a.py", "b.py", "c.py", "d.py"):
+        (tmp_path / name).write_text("needle\n", encoding="utf-8")
+
+    files_result = search_files.execute(
+        {"pattern": "*.py", "limit": 1},
+        ExecutionContext(workspace=tmp_path),
+    )
+    content_result = search_files.execute(
+        {"pattern": "needle", "target": "content", "limit": 1},
+        ExecutionContext(workspace=tmp_path),
+    )
+
+    assert files_result["files"] == ["a.py"]
+    assert files_result["total_count"] == 2
+    assert files_result["total_count_is_exact"] is False
+    assert files_result["truncated"] is True
+    assert content_result["matches"] == [
+        {"path": "a.py", "line": 1, "text": "needle"}
+    ]
+    assert content_result["total_count"] == 2
+    assert content_result["total_count_is_exact"] is False
+    assert content_result["truncated"] is True
+
+
+def test_search_files_bounds_long_matching_lines(tmp_path) -> None:
+    if which("rg") is None:
+        pytest.skip("ripgrep is not installed")
+
+    (tmp_path / "minified.txt").write_text(
+        "needle" + "x" * (MAX_SEARCH_MATCH_CHARS * 2) + "\n",
+        encoding="utf-8",
+    )
+
+    result = search_files.execute(
+        {"pattern": "needle", "target": "content"},
+        ExecutionContext(workspace=tmp_path),
+    )
+
+    match = result["matches"][0]
+    assert len(match["text"]) == MAX_SEARCH_MATCH_CHARS
+    assert match["text_truncated"] is True

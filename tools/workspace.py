@@ -1,23 +1,34 @@
 from __future__ import annotations
 
 import fnmatch
-import json
-import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from shutil import which
-from typing import Literal, cast
+from typing import IO, Literal, cast
 
 from tools.base import ExecutionContext, JsonObject, JsonValue, tool
+from tools.process import (
+    DelimitedTextReader,
+    ProcessExecutionError,
+    collect_process_page,
+)
 
 DEFAULT_READ_OFFSET = 1
 DEFAULT_READ_LIMIT = 500
 MAX_READ_LIMIT = 2000
+MAX_READ_FILE_CHARS = 100_000
+MAX_READ_LINE_CHARS = 2_000
 MAX_READ_MANY_FILES = 20
 DEFAULT_READ_MANY_TOTAL_CHARS = 100_000
 MAX_READ_MANY_TOTAL_CHARS = 250_000
 DEFAULT_SEARCH_LIMIT = 50
 MAX_SEARCH_LIMIT = 500
+SEARCH_TIMEOUT_SECONDS = 30.0
+MAX_SEARCH_ERROR_CHARS = 10_000
+MAX_SEARCH_MATCH_CHARS = 4_000
+MAX_SEARCH_RECORD_CHARS = MAX_SEARCH_MATCH_CHARS + 1_000
+MAX_SEARCH_PATH_CHARS = 32_768
+_LINE_TRUNCATION_MARKER = " ... [truncated]"
 
 
 class WorkspacePathError(ValueError):
@@ -60,9 +71,9 @@ def relative_workspace_path(context: ExecutionContext, path: Path) -> str:
 
 
 def _normalize_search_pagination(offset: int, limit: int) -> tuple[int, int]:
-    normalized_offset = max(0, int(offset))
-    normalized_limit = max(1, min(int(limit), MAX_SEARCH_LIMIT))
-    return normalized_offset, normalized_limit
+    page_offset = max(0, int(offset))
+    page_limit = max(1, min(int(limit), MAX_SEARCH_LIMIT))
+    return page_offset, page_limit
 
 
 def _file_search_glob(pattern: str) -> str:
@@ -85,18 +96,61 @@ def _normalize_ripgrep_file(path: str) -> str:
     return path.removeprefix("./")
 
 
-def _as_object_mapping(value: object) -> Mapping[str, object] | None:
-    if not isinstance(value, Mapping):
-        return None
-    return cast(Mapping[str, object], value)
+def _file_records(stream: IO[str]) -> Iterator[str]:
+    reader = DelimitedTextReader(stream)
+    while (path := reader.read_until("\0", MAX_SEARCH_PATH_CHARS)) is not None:
+        if path:
+            yield _normalize_ripgrep_file(path)
 
 
-def _content_match_sort_key(match: JsonObject) -> tuple[str, int]:
-    path = match.get("path")
-    line = match.get("line")
-    path_key = path if isinstance(path, str) else ""
-    line_key = line if isinstance(line, int) else 0
-    return path_key, line_key
+def _content_records(stream: IO[str]) -> Iterator[JsonObject]:
+    reader = DelimitedTextReader(stream)
+    while (path := reader.read_until("\0", MAX_SEARCH_PATH_CHARS)) is not None:
+        record = reader.read_until("\n", MAX_SEARCH_RECORD_CHARS)
+        if record is None:
+            raise WorkspaceToolError("ripgrep emitted an incomplete match")
+
+        line_text, separator, text = record.partition(":")
+        if not separator:
+            raise WorkspaceToolError("ripgrep emitted an invalid match")
+        try:
+            line_number = int(line_text)
+        except ValueError as exc:
+            raise WorkspaceToolError("ripgrep emitted an invalid line number") from exc
+
+        text = text.rstrip("\r")
+        text_truncated = len(text) > MAX_SEARCH_MATCH_CHARS
+        match: JsonObject = {
+            "path": _normalize_ripgrep_file(path),
+            "line": line_number,
+            "text": text[:MAX_SEARCH_MATCH_CHARS],
+        }
+        if text_truncated:
+            match["text_truncated"] = True
+        yield match
+
+
+def _run_ripgrep_page[T](
+    *,
+    command: list[str],
+    workspace: Path,
+    offset: int,
+    limit: int,
+    records: Callable[[IO[str]], Iterator[T]],
+) -> tuple[list[T], int, bool]:
+    try:
+        return collect_process_page(
+            command=command,
+            cwd=workspace,
+            offset=offset,
+            limit=limit,
+            records=records,
+            timeout_seconds=SEARCH_TIMEOUT_SECONDS,
+            max_error_chars=MAX_SEARCH_ERROR_CHARS,
+            success_returncodes=(0, 1),
+        )
+    except ProcessExecutionError as exc:
+        raise WorkspaceToolError(f"ripgrep failed: {exc}") from exc
 
 
 def _ripgrep_files(
@@ -105,21 +159,24 @@ def _ripgrep_files(
     workspace: Path,
     root: str,
     glob_pattern: str,
-) -> list[str]:
-    result = subprocess.run(
-        [rg, "--files", "-g", glob_pattern, root],
-        cwd=workspace,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    if result.returncode not in {0, 1}:
-        message = result.stderr.strip() or "file search failed"
-        raise WorkspaceToolError(message)
-
-    return sorted(
-        _normalize_ripgrep_file(line) for line in result.stdout.splitlines() if line
+    offset: int,
+    limit: int,
+) -> tuple[list[str], int, bool]:
+    return _run_ripgrep_page(
+        command=[
+            rg,
+            "--files",
+            "--null",
+            "--sort",
+            "path",
+            "-g",
+            glob_pattern,
+            root,
+        ],
+        workspace=workspace,
+        offset=offset,
+        limit=limit,
+        records=_file_records,
     )
 
 
@@ -129,57 +186,32 @@ def _ripgrep_content(
     workspace: Path,
     root: str,
     pattern: str,
-) -> list[JsonObject]:
-    result = subprocess.run(
-        [rg, "--json", "--color", "never", "--", pattern, root],
-        cwd=workspace,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
+    offset: int,
+    limit: int,
+) -> tuple[list[JsonObject], int, bool]:
+    return _run_ripgrep_page(
+        command=[
+            rg,
+            "--null",
+            "--with-filename",
+            "--no-heading",
+            "--line-number",
+            "--max-columns",
+            str(MAX_SEARCH_MATCH_CHARS),
+            "--max-columns-preview",
+            "--sort",
+            "path",
+            "--color",
+            "never",
+            "--",
+            pattern,
+            root,
+        ],
+        workspace=workspace,
+        offset=offset,
+        limit=limit,
+        records=_content_records,
     )
-    if result.returncode not in {0, 1}:
-        message = result.stderr.strip() or "content search failed"
-        raise WorkspaceToolError(message)
-
-    matches: list[JsonObject] = []
-    for line in result.stdout.splitlines():
-        event = _as_object_mapping(cast(object, json.loads(line)))
-        if event is None:
-            continue
-        if event.get("type") != "match":
-            continue
-
-        data = _as_object_mapping(event.get("data"))
-        if data is None:
-            continue
-
-        path_data = _as_object_mapping(data.get("path"))
-        lines_data = _as_object_mapping(data.get("lines"))
-        line_number = data.get("line_number")
-        if path_data is None:
-            continue
-        if lines_data is None:
-            continue
-
-        path_text = path_data.get("text")
-        lines_text = lines_data.get("text")
-        if not isinstance(path_text, str):
-            continue
-        if not isinstance(lines_text, str):
-            continue
-        if not isinstance(line_number, int):
-            continue
-
-        match: JsonObject = {
-            "path": _normalize_ripgrep_file(path_text),
-            "line": line_number,
-            "text": lines_text.rstrip("\n"),
-        }
-        matches.append(match)
-
-    matches.sort(key=_content_match_sort_key)
-    return matches
 
 
 @tool(
@@ -202,57 +234,99 @@ def search_files(
     workspace = context.workspace.resolve()
     root = relative_workspace_path(context, resolved)
     rg = require_ripgrep()
-    normalized_offset, normalized_limit = _normalize_search_pagination(offset, limit)
+    page_offset, page_limit = _normalize_search_pagination(offset, limit)
 
     if target == "files":
         if resolved.is_file():
             files = [root] if _file_matches_pattern(root, pattern) else []
+            end = page_offset + page_limit
+            file_page = files[page_offset:end]
+            total_count = len(files)
+            truncated = end < total_count
+            total_count_is_exact = True
         else:
-            files = _ripgrep_files(
+            file_page, total_count, truncated = _ripgrep_files(
                 rg=rg,
                 workspace=workspace,
                 root=root,
                 glob_pattern=_file_search_glob(pattern),
+                offset=page_offset,
+                limit=page_limit,
             )
-
-        end = normalized_offset + normalized_limit
-        file_page: list[str] = files[normalized_offset:end]
+            total_count_is_exact = not truncated
 
         response: JsonObject = {
             "target": "files",
             "pattern": pattern,
             "path": root,
             "files": cast(JsonValue, file_page),
-            "offset": normalized_offset,
-            "limit": normalized_limit,
-            "total_count": len(files),
-            "truncated": end < len(files),
+            "offset": page_offset,
+            "limit": page_limit,
+            "total_count": total_count,
+            "total_count_is_exact": total_count_is_exact,
+            "truncated": truncated,
         }
         return response
 
     if target == "content":
-        matches = _ripgrep_content(
+        match_page, total_count, truncated = _ripgrep_content(
             rg=rg,
             workspace=workspace,
             root=root,
             pattern=pattern,
+            offset=page_offset,
+            limit=page_limit,
         )
-        end = normalized_offset + normalized_limit
-        match_page: list[JsonObject] = matches[normalized_offset:end]
 
         response: JsonObject = {
             "target": "content",
             "pattern": pattern,
             "path": root,
             "matches": cast(JsonValue, match_page),
-            "offset": normalized_offset,
-            "limit": normalized_limit,
-            "total_count": len(matches),
-            "truncated": end < len(matches),
+            "offset": page_offset,
+            "limit": page_limit,
+            "total_count": total_count,
+            "total_count_is_exact": not truncated,
+            "truncated": truncated,
         }
         return response
 
     raise WorkspaceToolError("target must be 'files' or 'content'")
+
+
+def _bounded_text_lines(file: IO[str]) -> Iterator[tuple[str, bool]]:
+    parts: list[str] = []
+    retained_chars = 0
+    truncated = False
+    pending_line = False
+
+    while chunk := file.readline(8192):
+        pending_line = True
+        line_ended = chunk.endswith("\n")
+        text = chunk[:-1] if line_ended else chunk
+        remaining = MAX_READ_LINE_CHARS - retained_chars
+        if remaining > 0:
+            retained = text[:remaining]
+            parts.append(retained)
+            retained_chars += len(retained)
+        if len(text) > max(0, remaining):
+            truncated = True
+
+        if line_ended:
+            line = "".join(parts)
+            if truncated:
+                line += _LINE_TRUNCATION_MARKER
+            yield line, truncated
+            parts = []
+            retained_chars = 0
+            truncated = False
+            pending_line = False
+
+    if pending_line:
+        line = "".join(parts)
+        if truncated:
+            line += _LINE_TRUNCATION_MARKER
+        yield line, truncated
 
 
 def _read_text_file(
@@ -261,30 +335,99 @@ def _read_text_file(
     context: ExecutionContext,
     offset: int,
     limit: int,
-) -> JsonObject:
+    max_chars: int = MAX_READ_FILE_CHARS,
+) -> tuple[JsonObject, bool]:
     resolved = resolve_workspace_path(context, path)
     if not resolved.is_file():
         raise WorkspacePathError(f"Not a file: {path}")
 
-    normalized_offset = max(1, int(offset))
-    normalized_limit = max(1, min(int(limit), MAX_READ_LIMIT))
-    lines = resolved.read_text(encoding="utf-8").splitlines()
-    start = normalized_offset - 1
-    end = start + normalized_limit
-    selected = lines[start:end]
-    numbered = [
-        f"{line_number}|{line}"
-        for line_number, line in enumerate(selected, start=normalized_offset)
-    ]
+    page_offset = max(1, int(offset))
+    page_limit = max(1, min(int(limit), MAX_READ_LIMIT))
+    char_limit = max(1, min(int(max_chars), MAX_READ_FILE_CHARS))
+    page_end = page_offset + page_limit - 1
+    output_lines: list[str] = []
+    output_chars = 0
+    total_lines = 0
+    total_lines_is_exact = False
+    char_truncated = False
+    line_truncated = False
+    partial_line_truncated = False
+    next_offset: int | None = None
 
-    return {
+    with resolved.open("r", encoding="utf-8") as file:
+        for line_number, (line, was_truncated) in enumerate(
+            _bounded_text_lines(file),
+            start=1,
+        ):
+            total_lines = line_number
+            if line_number < page_offset:
+                continue
+
+            numbered = f"{line_number}|{line}"
+            separator_chars = 1 if output_lines else 0
+            if output_chars + separator_chars + len(numbered) > char_limit:
+                char_truncated = True
+                if not output_lines:
+                    partial_line_truncated = True
+                    output_lines.append(numbered[:char_limit])
+                    output_chars = len(output_lines[0])
+                    next_char = file.read(1)
+                    if next_char:
+                        total_lines += 1
+                        next_offset = line_number + 1
+                    else:
+                        total_lines_is_exact = True
+                else:
+                    next_offset = line_number
+                break
+
+            output_lines.append(numbered)
+            output_chars += separator_chars + len(numbered)
+            line_truncated = line_truncated or was_truncated
+
+            if line_number >= page_end:
+                next_char = file.read(1)
+                if next_char:
+                    total_lines += 1
+                    next_offset = line_number + 1
+                else:
+                    total_lines_is_exact = True
+                break
+        else:
+            total_lines_is_exact = True
+
+    if total_lines_is_exact and total_lines > 0 and page_offset > total_lines:
+        raise WorkspaceToolError(
+            f"Offset {page_offset} exceeds the file's {total_lines} lines"
+        )
+
+    truncated = char_truncated or line_truncated or next_offset is not None
+    result: JsonObject = {
         "path": relative_workspace_path(context, resolved),
-        "content": "\n".join(numbered),
-        "offset": normalized_offset,
-        "limit": normalized_limit,
-        "total_lines": len(lines),
-        "truncated": end < len(lines),
+        "content": "\n".join(output_lines),
+        "offset": page_offset,
+        "limit": page_limit,
+        "total_lines": total_lines,
+        "total_lines_is_exact": total_lines_is_exact,
+        "truncated": truncated,
     }
+    hints: list[str] = []
+    if next_offset is not None:
+        result["next_offset"] = next_offset
+        hints.append(f"Continue with offset={next_offset}.")
+    if line_truncated:
+        result["line_truncated"] = True
+        hints.append(
+            f"Lines longer than {MAX_READ_LINE_CHARS:,} characters were clipped."
+        )
+    if partial_line_truncated:
+        hints.append(
+            "The first selected line exceeded the output budget; its omitted "
+            "remainder cannot be retrieved with a line offset."
+        )
+    if hints:
+        result["hint"] = " ".join(hints)
+    return result, truncated
 
 
 @tool(
@@ -298,12 +441,13 @@ def read_file(
     offset: int = DEFAULT_READ_OFFSET,
     limit: int = DEFAULT_READ_LIMIT,
 ) -> JsonObject:
-    return _read_text_file(
+    result, _ = _read_text_file(
         path=path,
         context=context,
         offset=offset,
         limit=limit,
     )
+    return result
 
 
 @tool(
@@ -319,7 +463,7 @@ def read_many(
     max_total_chars: int = DEFAULT_READ_MANY_TOTAL_CHARS,
 ) -> JsonObject:
     selected_paths = paths[:MAX_READ_MANY_FILES]
-    normalized_max_chars = max(
+    char_limit = max(
         1,
         min(int(max_total_chars), MAX_READ_MANY_TOTAL_CHARS),
     )
@@ -330,12 +474,17 @@ def read_many(
     budget_truncated = False
 
     for path in selected_paths:
+        remaining_chars = char_limit - total_chars
+        if remaining_chars <= 0:
+            break
+
         try:
-            result = _read_text_file(
+            result, file_truncated = _read_text_file(
                 path=path,
                 context=context,
                 offset=offset,
                 limit=limit,
+                max_chars=remaining_chars,
             )
         except (OSError, UnicodeError, WorkspacePathError) as exc:
             errors.append(
@@ -356,20 +505,13 @@ def read_many(
             )
             continue
 
-        remaining_chars = normalized_max_chars - total_chars
-        if remaining_chars <= 0:
-            break
-
-        if len(content) > remaining_chars:
-            result["content"] = content[:remaining_chars]
-            result["truncated"] = True
-            content = content[:remaining_chars]
+        if file_truncated:
             budget_truncated = True
 
         files.append(result)
         total_chars += len(content)
 
-        if total_chars >= normalized_max_chars:
+        if total_chars >= char_limit:
             break
 
     processed_count = len(files) + len(errors)
@@ -380,7 +522,7 @@ def read_many(
         "requested_count": len(paths),
         "processed_count": processed_count,
         "total_chars": total_chars,
-        "max_total_chars": normalized_max_chars,
+        "max_total_chars": char_limit,
         "truncated": (
             budget_truncated
             or len(paths) > len(selected_paths)
