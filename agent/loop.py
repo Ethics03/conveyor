@@ -126,8 +126,7 @@ def _save_assistant_message(
     store: Store,
 ) -> Message:
     metadata = dict(response.raw)
-    if response.finish_reason is not None:
-        metadata["finish_reason"] = response.finish_reason
+    metadata["finish_reason"] = response.finish_reason
     if response.replay_state is not None:
         metadata["provider_replay_state"] = response.replay_state.to_metadata()
 
@@ -171,6 +170,26 @@ def _save_assistant_message(
                 )
             )
     return message
+
+
+def _provider_response_error(response: ProviderResponse) -> str | None:
+    reason = response.finish_reason
+    if response.tool_calls:
+        if reason == "tool_use":
+            return None
+        return f"Provider returned tool calls with finish reason: {reason}"
+
+    if reason == "stop":
+        return None
+    if reason == "tool_use":
+        return "Provider returned tool_use without any tool calls"
+    if reason == "max_tokens":
+        return "Provider response stopped at a token limit"
+    if reason == "refusal":
+        return "Provider refused the request"
+    if reason == "pause":
+        return "Provider paused without a resumable tool call"
+    return "Provider returned an unknown finish reason"
 
 
 def _preflight_tool_calls(
@@ -700,6 +719,16 @@ def run_agent(
                 store=store,
             )
             messages.append(final_message)
+
+            response_error = _provider_response_error(response)
+            if response_error is not None:
+                return _fail_run(
+                    run=run,
+                    error=response_error,
+                    iterations=iterations,
+                    store=store,
+                    final_message=final_message,
+                )
 
             if not final_message.tool_calls:
                 return _finish_run(

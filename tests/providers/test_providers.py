@@ -14,6 +14,7 @@ from providers.anthropic_provider import (
     ANTHROPIC_COMPACTION_BETA,
     AnthropicProvider,
     _anthropic_messages,
+    _normalize_finish_reason,
 )
 from providers.base import ModelLimits, ProviderRequest
 from providers.fake import FakeProvider
@@ -42,6 +43,27 @@ def test_provider_response_can_contain_text_and_tool_calls() -> None:
     assert len(response.tool_calls) == 1
     assert response.tool_calls[0].id == "call_readme"
     assert response.tool_calls[0].name == "read_file"
+
+
+@pytest.mark.parametrize(
+    ("anthropic_reason", "conveyor_reason"),
+    [
+        ("end_turn", "stop"),
+        ("stop_sequence", "stop"),
+        ("tool_use", "tool_use"),
+        ("max_tokens", "max_tokens"),
+        ("model_context_window_exceeded", "max_tokens"),
+        ("refusal", "refusal"),
+        ("pause_turn", "pause"),
+        ("future_reason", "unknown"),
+        (None, "unknown"),
+    ],
+)
+def test_anthropic_finish_reasons_are_normalized(
+    anthropic_reason: str | None,
+    conveyor_reason: str,
+) -> None:
+    assert _normalize_finish_reason(anthropic_reason) == conveyor_reason
 
 
 def test_fake_provider_rejects_requests_after_close() -> None:
