@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import threading
+import time
 from collections import deque
 from math import isfinite
 from pathlib import Path
@@ -20,6 +21,7 @@ from tools.workspace import (
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 120.0
 MAX_COMMAND_TIMEOUT_SECONDS = 600.0
 MAX_COMMAND_OUTPUT_CHARS = 100_000
+COMMAND_POLL_INTERVAL_SECONDS = 0.1
 _OUTPUT_TRUNCATION_MARKER = "\n... output truncated ...\n"
 _SENSITIVE_ENV_FRAGMENTS = (
     "ACCESS_KEY",
@@ -185,17 +187,27 @@ def bash(
     stderr_thread.start()
 
     timed_out = False
+    deadline = time.monotonic() + normalized_timeout
     try:
-        _ = process.wait(timeout=normalized_timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        terminate_process(process)
+        while process.poll() is None:
+            context.cancellation.raise_if_cancelled()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            try:
+                _ = process.wait(
+                    timeout=min(COMMAND_POLL_INTERVAL_SECONDS, remaining)
+                )
+            except subprocess.TimeoutExpired:
+                pass
+        context.cancellation.raise_if_cancelled()
     except BaseException:
         terminate_process(process)
         raise
-    else:
-        # A foreground command must not leave background descendants running.
-        terminate_process(process)
+
+    # A foreground command must not leave background descendants running.
+    terminate_process(process)
 
     stdout_thread.join(timeout=2)
     stderr_thread.join(timeout=2)

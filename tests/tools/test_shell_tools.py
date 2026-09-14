@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
+from agent.cancellation import RunCancelled
 from agent.models import ToolCall
 from tools.base import ExecutionContext
 from tools.registry import ToolRegistry
@@ -70,6 +74,29 @@ def test_bash_terminates_timed_out_command(tmp_path) -> None:
 
     assert result["timed_out"] is True
     assert result["exit_code"] != 0
+
+
+def test_bash_terminates_cancelled_command(tmp_path) -> None:
+    context = ExecutionContext(workspace=tmp_path)
+    marker = tmp_path / "started"
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            bash.execute,
+            {"command": "touch started; sleep 30"},
+            context,
+        )
+        deadline = time.monotonic() + 1
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert marker.exists()
+
+        started_at = time.monotonic()
+        _ = context.cancellation.cancel("Stop command")
+        with pytest.raises(RunCancelled, match="Stop command"):
+            _ = future.result(timeout=2)
+
+    assert time.monotonic() - started_at < 2
 
 
 def test_bash_kills_command_that_ignores_termination(tmp_path) -> None:

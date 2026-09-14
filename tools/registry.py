@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any, cast
 
+from agent.cancellation import RunCancelled
 from agent.models import ToolCall, ToolPermission, ToolResult
 from providers.base import ToolSchema
 from tools.base import (
@@ -64,6 +65,8 @@ class ToolRegistry:
 
         try:
             output = tool.execute(_json_object(tool_call.arguments), context)
+        except RunCancelled:
+            raise
         except Exception as exc:
             return ToolResult(
                 tool_call_id=tool_call.id,

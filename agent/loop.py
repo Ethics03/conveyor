@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Literal
 
 from agent.approvals import (
     ApprovalCallback,
@@ -9,6 +10,7 @@ from agent.approvals import (
     PolicyDecision,
     ToolCallDecision,
 )
+from agent.cancellation import CancellationToken, RunCancelled
 from agent.context import ContextBudget, ContextPlan, plan_context
 from agent.models import (
     Agent,
@@ -31,6 +33,7 @@ from tools.registry import ToolRegistry
 
 MAX_ITERATIONS = 20
 MAX_PARALLEL_TOOL_WORKERS = 8
+ToolLifecycleEvent = Literal["tool.finished", "tool.cancelled"]
 
 
 def _start_run(
@@ -294,6 +297,7 @@ def _request_approvals(
     iterations: int,
     store: Store,
     callback: ApprovalCallback | None,
+    cancellation: CancellationToken,
 ) -> dict[str, ApprovalRequest]:
     approvals = _block_run(
         run=run,
@@ -305,7 +309,9 @@ def _request_approvals(
     resolved: list[ApprovalRequest] = []
     try:
         for approval in approvals:
+            cancellation.raise_if_cancelled()
             choice = callback(approval) if callback is not None else "denied"
+            cancellation.raise_if_cancelled()
             resolved.append(store.resolve_approval(approval.id, choice))
     except Exception:
         resolved_ids = {approval.id for approval in resolved}
@@ -391,6 +397,7 @@ def _execute_tool_call(
     context: ExecutionContext,
     store: Store,
 ) -> Message:
+    context.cancellation.raise_if_cancelled()
     _record_tool_started(
         tool_call=tool_call,
         session=session,
@@ -398,6 +405,7 @@ def _execute_tool_call(
         store=store,
     )
     result = registry.execute(tool_call, context)
+    context.cancellation.raise_if_cancelled()
     return _save_tool_result(
         result=result,
         session=session,
@@ -427,6 +435,40 @@ def _record_tool_started(
     )
 
 
+def _save_tool_message(
+    *,
+    message: Message,
+    ok: bool,
+    lifecycle_event: ToolLifecycleEvent,
+    lifecycle_payload: dict[str, object],
+    store: Store,
+) -> Message:
+    store.save_message(message)
+    store.append_event(
+        Event(
+            type="message.created",
+            session_id=message.session_id,
+            run_id=message.run_id,
+            message_id=message.id,
+            payload={
+                "role": message.role,
+                "name": message.name,
+                "ok": ok,
+            },
+        )
+    )
+    store.append_event(
+        Event(
+            type=lifecycle_event,
+            session_id=message.session_id,
+            run_id=message.run_id,
+            message_id=message.id,
+            payload=lifecycle_payload,
+        )
+    )
+    return message
+
+
 def _save_tool_result(
     *,
     result: ToolResult,
@@ -447,35 +489,17 @@ def _save_tool_result(
         metadata=metadata,
     )
 
-    store.save_message(message)
-    store.append_event(
-        Event(
-            type="message.created",
-            session_id=session.id,
-            run_id=run.id,
-            message_id=message.id,
-            payload={
-                "role": message.role,
-                "name": result.name,
-                "ok": result.ok,
-            },
-        )
+    return _save_tool_message(
+        message=message,
+        ok=result.ok,
+        lifecycle_event="tool.finished",
+        lifecycle_payload={
+            "tool_call_id": result.tool_call_id,
+            "name": result.name,
+            "ok": result.ok,
+        },
+        store=store,
     )
-    store.append_event(
-        Event(
-            type="tool.finished",
-            session_id=session.id,
-            run_id=run.id,
-            message_id=message.id,
-            payload={
-                "tool_call_id": result.tool_call_id,
-                "name": result.name,
-                "ok": result.ok,
-            },
-        )
-    )
-
-    return message
 
 
 def _execute_parallel_tool_calls(
@@ -487,6 +511,7 @@ def _execute_parallel_tool_calls(
     context: ExecutionContext,
     store: Store,
 ) -> list[Message]:
+    context.cancellation.raise_if_cancelled()
     if len(tool_calls) < 2:
         return [
             _execute_tool_call(
@@ -503,6 +528,7 @@ def _execute_parallel_tool_calls(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures: list[Future[ToolResult]] = []
         for tool_call in tool_calls:
+            context.cancellation.raise_if_cancelled()
             _record_tool_started(
                 tool_call=tool_call,
                 session=session,
@@ -513,6 +539,7 @@ def _execute_parallel_tool_calls(
 
         results = [future.result() for future in futures]
 
+    context.cancellation.raise_if_cancelled()
     return [
         _save_tool_result(
             result=result,
@@ -554,6 +581,7 @@ def _execute_tool_decisions(
         parallel_calls.clear()
 
     for decision in decisions:
+        context.cancellation.raise_if_cancelled()
         approval = approvals_by_tool_call.get(decision.tool_call.id)
         denied = decision.decision.action == "deny" or (
             approval is not None and approval.status == "denied"
@@ -666,6 +694,88 @@ def _fail_run(
     )
 
 
+def _save_cancelled_tool_results(
+    *,
+    run: Run,
+    final_message: Message | None,
+    reason: str,
+    store: Store,
+) -> None:
+    if final_message is None or not final_message.tool_calls:
+        return
+
+    completed_tool_calls = {
+        message.tool_call_id
+        for message in store.list_messages(run.session_id)
+        if message.run_id == run.id
+        and message.role == "tool"
+        and message.tool_call_id is not None
+    }
+    for tool_call in final_message.tool_calls:
+        if tool_call.id in completed_tool_calls:
+            continue
+        cancelled_message = Message(
+            session_id=run.session_id,
+            run_id=run.id,
+            role="tool",
+            content=f"Tool execution cancelled: {reason}",
+            name=tool_call.name,
+            tool_call_id=tool_call.id,
+            metadata={"ok": False, "cancelled": True},
+        )
+        _ = _save_tool_message(
+            message=cancelled_message,
+            ok=False,
+            lifecycle_event="tool.cancelled",
+            lifecycle_payload={
+                "tool_call_id": tool_call.id,
+                "name": tool_call.name,
+                "reason": reason,
+            },
+            store=store,
+        )
+
+
+def _cancel_run(
+    *,
+    run: Run,
+    reason: str,
+    iterations: int,
+    store: Store,
+    final_message: Message | None = None,
+) -> RunOutcome:
+    _save_cancelled_tool_results(
+        run=run,
+        final_message=final_message,
+        reason=reason,
+        store=store,
+    )
+
+    run.status = "cancelled"
+    run.error = reason
+    run.updated_at = utc_now()
+
+    store.save_run(run)
+    store.append_event(
+        Event(
+            type="run.cancelled",
+            session_id=run.session_id,
+            run_id=run.id,
+            message_id=final_message.id if final_message else None,
+            payload={
+                "reason": reason,
+                "iterations": iterations,
+            },
+        )
+    )
+
+    return RunOutcome(
+        run=run,
+        final_message=final_message,
+        iterations=iterations,
+    )
+
+
 def run_agent(
     *,
     agent: Agent,
@@ -700,6 +810,7 @@ def run_agent(
 
     try:
         for iterations in range(1, max_iterations + 1):
+            context.cancellation.raise_if_cancelled()
             request = _plan_provider_request(
                 agent=agent,
                 session=session,
@@ -710,7 +821,9 @@ def run_agent(
                 store=store,
                 iteration=iterations,
             )
+            context.cancellation.raise_if_cancelled()
             response = provider.generate(request)
+            context.cancellation.raise_if_cancelled()
 
             final_message = _save_assistant_message(
                 response=response,
@@ -753,6 +866,7 @@ def run_agent(
                     iterations=iterations,
                     store=store,
                     callback=approval_callback,
+                    cancellation=context.cancellation,
                 )
 
             messages.extend(
@@ -768,6 +882,14 @@ def run_agent(
                 )
             )
 
+    except RunCancelled as exc:
+        return _cancel_run(
+            run=run,
+            reason=str(exc),
+            iterations=iterations,
+            store=store,
+            final_message=final_message,
+        )
     except Exception as exc:
         _ = _fail_run(
             run=run,
