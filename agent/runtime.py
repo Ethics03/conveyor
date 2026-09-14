@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
 from typing import Self
 
 from agent.approvals import ApprovalCallback
+from agent.cancellation import DEFAULT_CANCELLATION_REASON, CancellationToken
 from agent.loop import run_agent
 from agent.models import Agent, Event, Message, RunOutcome, Session
 from agent.titles import (
@@ -32,6 +34,16 @@ class Runtime:
     workspace: Path
     context: ExecutionContext = field(init=False)
     _closed: bool = field(default=False, init=False, repr=False)
+    _active_turns: dict[str, CancellationToken] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _active_turns_lock: threading.Lock = field(
+        default_factory=threading.Lock,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         self.workspace = self.workspace.expanduser().resolve()
@@ -53,6 +65,37 @@ class Runtime:
         self.store.save_session(session)
         return session
 
+    def interrupt_session(
+        self,
+        session_id: str,
+        reason: str = DEFAULT_CANCELLATION_REASON,
+    ) -> bool:
+        """Request cancellation of the active turn without closing its session."""
+        self._ensure_open()
+        with self._active_turns_lock:
+            cancellation = self._active_turns.get(session_id)
+        if cancellation is None:
+            return False
+        _ = cancellation.cancel(reason)
+        return True
+
+    def _begin_turn(self, session_id: str) -> CancellationToken:
+        cancellation = CancellationToken()
+        with self._active_turns_lock:
+            if session_id in self._active_turns:
+                raise RuntimeError(f"Session already has an active turn: {session_id}")
+            self._active_turns[session_id] = cancellation
+        return cancellation
+
+    def _end_turn(
+        self,
+        session_id: str,
+        cancellation: CancellationToken,
+    ) -> None:
+        with self._active_turns_lock:
+            if self._active_turns.get(session_id) is cancellation:
+                del self._active_turns[session_id]
+
     def run_turn(
         self,
         *,
@@ -71,30 +114,38 @@ class Runtime:
         if persisted_session.status != "active":
             raise ValueError(f"Session is not active: {session.id}")
 
-        user_message = Message(
-            session_id=persisted_session.id,
-            role="user",
-            content=content,
-        )
-        self.store.save_message(user_message)
-        self.store.append_event(
-            Event(
-                type="message.created",
+        cancellation = self._begin_turn(persisted_session.id)
+        try:
+            user_message = Message(
                 session_id=persisted_session.id,
-                message_id=user_message.id,
-                payload={"role": user_message.role},
+                role="user",
+                content=content,
             )
-        )
+            self.store.save_message(user_message)
+            self.store.append_event(
+                Event(
+                    type="message.created",
+                    session_id=persisted_session.id,
+                    message_id=user_message.id,
+                    payload={"role": user_message.role},
+                )
+            )
 
-        outcome = run_agent(
-            agent=agent,
-            session=persisted_session,
-            provider=self.provider,
-            registry=self.registry,
-            context=self.context,
-            store=self.store,
-            approval_callback=approval_callback,
-        )
+            outcome = run_agent(
+                agent=agent,
+                session=persisted_session,
+                provider=self.provider,
+                registry=self.registry,
+                context=ExecutionContext(
+                    workspace=self.workspace,
+                    cancellation=cancellation,
+                ),
+                store=self.store,
+                approval_callback=approval_callback,
+            )
+        finally:
+            self._end_turn(persisted_session.id, cancellation)
+
         if (
             persisted_session.title_source == "default"
             and outcome.run.status == "finished"

@@ -3,11 +3,12 @@ from __future__ import annotations
 import inspect
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import NoneType, UnionType
 from typing import Any, Literal, cast, get_args, get_origin
 
+from agent.cancellation import CancellationToken
 from agent.models import ToolPermission
 from providers.base import ToolSchema
 
@@ -20,6 +21,7 @@ ToolExecutor = Callable[[JsonObject, "ExecutionContext"], ToolOutput]
 @dataclass(slots=True)
 class ExecutionContext:
     workspace: Path
+    cancellation: CancellationToken = field(default_factory=CancellationToken)
 
 
 @dataclass(slots=True)

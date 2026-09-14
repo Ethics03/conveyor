@@ -4,6 +4,7 @@ from typing import Literal
 
 import pytest
 
+from agent.cancellation import RunCancelled
 from agent.models import ToolCall
 from tools.base import ExecutionContext, tool
 from tools.defaults import build_default_registry
@@ -44,6 +45,20 @@ def test_tool_decorator_marks_parallel_safe_tools() -> None:
         return "ok"
 
     assert inspect_workspace.parallel_safe is True
+
+
+def test_registry_does_not_convert_cancellation_into_tool_failure(tmp_path) -> None:
+    @tool(permission="read")
+    def cancelled(context: ExecutionContext) -> str:
+        _ = context.cancellation.cancel("Stop tool")
+        context.cancellation.raise_if_cancelled()
+        return "unreachable"
+
+    with pytest.raises(RunCancelled, match="Stop tool"):
+        _ = ToolRegistry([cancelled]).execute(
+            ToolCall(name="cancelled"),
+            ExecutionContext(workspace=tmp_path),
+        )
 
 
 def test_tool_decorator_builds_string_literal_enum() -> None:

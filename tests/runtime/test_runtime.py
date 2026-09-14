@@ -1,13 +1,17 @@
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from sqlite3 import ProgrammingError
+from threading import Event
 from unittest.mock import Mock
 
 import pytest
 
-from agent.models import Agent, Session
+from agent.models import Agent, ProviderResponse, Session, ToolCall
 from agent.runtime import Runtime
 from providers.fake import FakeProvider
 from storage.store import Store
+from tools.base import ExecutionContext, tool
 from tools.registry import ToolRegistry
 
 
@@ -100,6 +104,81 @@ def test_run_turn_persists_input_and_executes_agent(tmp_path: Path) -> None:
             "  Keep this spacing.  "
         )
         assert len(provider.requests) == 1
+
+
+def test_interrupt_session_cancels_active_turn(tmp_path: Path) -> None:
+    tool_started = Event()
+
+    @tool(permission="read")
+    def wait_for_cancellation(context: ExecutionContext) -> str:
+        tool_started.set()
+        while True:
+            context.cancellation.raise_if_cancelled()
+            time.sleep(0.01)
+
+    store = Store()
+    provider = FakeProvider(
+        [
+            ProviderResponse(
+                tool_calls=[ToolCall(name="wait_for_cancellation")],
+                finish_reason="tool_use",
+            ),
+            ProviderResponse.message("Continued after cancellation."),
+        ]
+    )
+    registry = ToolRegistry([wait_for_cancellation])
+
+    with Runtime(store, provider, registry, tmp_path) as runtime:
+        session = runtime.create_session("Cancellation test")
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                runtime.run_turn,
+                agent=Agent(tools=["wait_for_cancellation"]),
+                session=session,
+                content="Wait until I stop the turn.",
+            )
+            assert tool_started.wait(timeout=1)
+            assert runtime.interrupt_session(session.id, "Stopped from Escape") is True
+            outcome = future.result(timeout=2)
+
+        assert outcome.run.status == "cancelled"
+        assert outcome.run.error == "Stopped from Escape"
+        assert session.status == "active"
+        cancelled_messages = store.list_messages(session.id)
+        assert [message.role for message in cancelled_messages] == [
+            "user",
+            "assistant",
+            "tool",
+        ]
+        assert cancelled_messages[-1].tool_call_id == (
+            cancelled_messages[-2].tool_calls[0].id
+        )
+        assert cancelled_messages[-1].metadata == {
+            "ok": False,
+            "cancelled": True,
+        }
+        assert [event.type for event in store.list_events(run_id=outcome.run.id)] == [
+            "run.started",
+            "message.created",
+            "tool.started",
+            "message.created",
+            "tool.cancelled",
+            "run.cancelled",
+        ]
+
+        continued = runtime.run_turn(
+            agent=Agent(tools=["wait_for_cancellation"]),
+            session=session,
+            content="Continue with the next turn.",
+        )
+        assert continued.run.status == "finished"
+        assert continued.final_message is not None
+        assert continued.final_message.content == "Continued after cancellation."
+        assert provider.requests[1].messages[-2].is_error is True
+        assert provider.requests[1].messages[-2].tool_call_id == (
+            cancelled_messages[-1].tool_call_id
+        )
+        assert runtime.interrupt_session(session.id) is False
 
 
 def test_run_turn_generates_title_for_default_session(tmp_path: Path) -> None:

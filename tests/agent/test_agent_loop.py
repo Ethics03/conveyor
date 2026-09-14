@@ -7,6 +7,7 @@ from threading import Event as ThreadEvent
 import pytest
 
 from agent.approvals import DefaultApprovalPolicy, PolicyDecision, ToolCallDecision
+from agent.cancellation import CancellationToken
 from agent.context import MIN_CLEARABLE_TOOL_RESULT_CHARS
 from agent.loop import (
     _block_run,
@@ -184,6 +185,35 @@ def test_run_agent_finishes_with_plain_response(tmp_path) -> None:
         "run.started",
         "message.created",
         "run.finished",
+    ]
+
+
+def test_run_agent_persists_cancellation_before_provider_call(tmp_path) -> None:
+    store = Store(":memory:")
+    session = _session_with_user_message(store)
+    provider = FakeProvider([ProviderResponse.message("Should not be requested")])
+    cancellation = CancellationToken()
+    _ = cancellation.cancel("Stopped from the client")
+
+    outcome = run_agent(
+        agent=Agent(),
+        session=session,
+        provider=provider,
+        registry=ToolRegistry(),
+        context=ExecutionContext(
+            workspace=tmp_path,
+            cancellation=cancellation,
+        ),
+        store=store,
+    )
+
+    assert outcome.run.status == "cancelled"
+    assert outcome.run.error == "Stopped from the client"
+    assert outcome.final_message is None
+    assert provider.requests == []
+    assert [event.type for event in store.list_events(run_id=outcome.run.id)] == [
+        "run.started",
+        "run.cancelled",
     ]
 
 
