@@ -92,11 +92,11 @@ def test_relative_workspace_path_rejects_outside_path(tmp_path) -> None:
         relative_workspace_path(context, outside)
 
 
-def test_read_file_returns_numbered_lines_with_metadata(tmp_path) -> None:
+async def test_read_file_returns_numbered_lines_with_metadata(tmp_path) -> None:
     path = tmp_path / "notes.txt"
     path.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
 
-    result = read_file.execute(
+    result = await read_file.execute(
         {"path": "notes.txt"},
         ExecutionContext(workspace=tmp_path),
     )
@@ -112,11 +112,11 @@ def test_read_file_returns_numbered_lines_with_metadata(tmp_path) -> None:
     }
 
 
-def test_read_file_supports_line_pagination(tmp_path) -> None:
+async def test_read_file_supports_line_pagination(tmp_path) -> None:
     path = tmp_path / "notes.txt"
     path.write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
 
-    result = read_file.execute(
+    result = await read_file.execute(
         {"path": "notes.txt", "offset": 2, "limit": 2},
         ExecutionContext(workspace=tmp_path),
     )
@@ -130,11 +130,11 @@ def test_read_file_supports_line_pagination(tmp_path) -> None:
     assert result["truncated"] is True
 
 
-def test_read_file_bounds_a_single_long_line(tmp_path) -> None:
+async def test_read_file_bounds_a_single_long_line(tmp_path) -> None:
     path = tmp_path / "minified.txt"
     path.write_text("x" * (MAX_READ_FILE_CHARS + 100) + "\nsecond\n", encoding="utf-8")
 
-    result = read_file.execute(
+    result = await read_file.execute(
         {"path": "minified.txt"},
         ExecutionContext(workspace=tmp_path),
     )
@@ -150,11 +150,11 @@ def test_read_file_bounds_a_single_long_line(tmp_path) -> None:
     assert result["truncated"] is True
 
 
-def test_read_file_stops_after_page_lookahead(tmp_path) -> None:
+async def test_read_file_stops_after_page_lookahead(tmp_path) -> None:
     path = tmp_path / "notes.txt"
     path.write_text("one\ntwo\nthree\nfour\nfive\n", encoding="utf-8")
 
-    result = read_file.execute(
+    result = await read_file.execute(
         {"path": "notes.txt", "limit": 2},
         ExecutionContext(workspace=tmp_path),
     )
@@ -166,23 +166,23 @@ def test_read_file_stops_after_page_lookahead(tmp_path) -> None:
     assert result["hint"] == "Continue with offset=3."
 
 
-def test_read_file_rejects_offset_past_end(tmp_path) -> None:
+async def test_read_file_rejects_offset_past_end(tmp_path) -> None:
     path = tmp_path / "notes.txt"
     path.write_text("one\ntwo\n", encoding="utf-8")
 
     with pytest.raises(WorkspaceToolError, match="Offset 3 exceeds.*2 lines"):
-        read_file.execute(
+        await read_file.execute(
             {"path": "notes.txt", "offset": 3},
             ExecutionContext(workspace=tmp_path),
         )
 
 
-def test_read_file_rejects_paths_outside_workspace(tmp_path) -> None:
+async def test_read_file_rejects_paths_outside_workspace(tmp_path) -> None:
     registry = ToolRegistry([read_file])
     outside = tmp_path.parent / "outside.txt"
     outside.write_text("secret", encoding="utf-8")
 
-    result = registry.execute(
+    result = await registry.execute(
         ToolCall(name="read_file", arguments={"path": str(outside)}),
         ExecutionContext(workspace=tmp_path),
     )
@@ -191,11 +191,11 @@ def test_read_file_rejects_paths_outside_workspace(tmp_path) -> None:
     assert "Path escapes workspace" in result.content
 
 
-def test_read_many_returns_multiple_files(tmp_path) -> None:
+async def test_read_many_returns_multiple_files(tmp_path) -> None:
     (tmp_path / "a.txt").write_text("alpha\n", encoding="utf-8")
     (tmp_path / "b.txt").write_text("beta\n", encoding="utf-8")
 
-    result = read_many.execute(
+    result = await read_many.execute(
         {"paths": ["a.txt", "b.txt"]},
         ExecutionContext(workspace=tmp_path),
     )
@@ -205,19 +205,19 @@ def test_read_many_returns_multiple_files(tmp_path) -> None:
             "path": "a.txt",
             "content": "1|alpha",
             "offset": 1,
-                "limit": 500,
-                "total_lines": 1,
-                "total_lines_is_exact": True,
-                "truncated": False,
+            "limit": 500,
+            "total_lines": 1,
+            "total_lines_is_exact": True,
+            "truncated": False,
         },
         {
             "path": "b.txt",
             "content": "1|beta",
             "offset": 1,
-                "limit": 500,
-                "total_lines": 1,
-                "total_lines_is_exact": True,
-                "truncated": False,
+            "limit": 500,
+            "total_lines": 1,
+            "total_lines_is_exact": True,
+            "truncated": False,
         },
     ]
     assert result["errors"] == []
@@ -225,10 +225,10 @@ def test_read_many_returns_multiple_files(tmp_path) -> None:
     assert result["truncated"] is False
 
 
-def test_read_many_preserves_partial_successes(tmp_path) -> None:
+async def test_read_many_preserves_partial_successes(tmp_path) -> None:
     (tmp_path / "present.txt").write_text("hello\n", encoding="utf-8")
 
-    result = read_many.execute(
+    result = await read_many.execute(
         {"paths": ["missing.txt", "present.txt"]},
         ExecutionContext(workspace=tmp_path),
     )
@@ -244,10 +244,10 @@ def test_read_many_preserves_partial_successes(tmp_path) -> None:
     assert result["truncated"] is False
 
 
-def test_read_many_enforces_total_character_limit(tmp_path) -> None:
+async def test_read_many_enforces_total_character_limit(tmp_path) -> None:
     (tmp_path / "notes.txt").write_text("abcdefghij\n", encoding="utf-8")
 
-    result = read_many.execute(
+    result = await read_many.execute(
         {"paths": ["notes.txt"], "max_total_chars": 5},
         ExecutionContext(workspace=tmp_path),
     )
@@ -259,8 +259,8 @@ def test_read_many_enforces_total_character_limit(tmp_path) -> None:
     assert result["truncated"] is True
 
 
-def test_write_file_creates_utf8_file_and_parent_directories(tmp_path) -> None:
-    result = write_file.execute(
+async def test_write_file_creates_utf8_file_and_parent_directories(tmp_path) -> None:
+    result = await write_file.execute(
         {"path": "notes/today.txt", "content": "hello, world\n"},
         ExecutionContext(workspace=tmp_path),
     )
@@ -275,11 +275,11 @@ def test_write_file_creates_utf8_file_and_parent_directories(tmp_path) -> None:
     )
 
 
-def test_write_file_replaces_existing_file(tmp_path) -> None:
+async def test_write_file_replaces_existing_file(tmp_path) -> None:
     path = tmp_path / "notes.txt"
     path.write_text("old content", encoding="utf-8")
 
-    result = write_file.execute(
+    result = await write_file.execute(
         {"path": "notes.txt", "content": "new content"},
         ExecutionContext(workspace=tmp_path),
     )
@@ -289,11 +289,11 @@ def test_write_file_replaces_existing_file(tmp_path) -> None:
     assert path.read_text(encoding="utf-8") == "new content"
 
 
-def test_write_file_rejects_paths_outside_workspace(tmp_path) -> None:
+async def test_write_file_rejects_paths_outside_workspace(tmp_path) -> None:
     registry = ToolRegistry([write_file])
     outside = tmp_path.parent / f"{tmp_path.name}-outside.txt"
 
-    result = registry.execute(
+    result = await registry.execute(
         ToolCall(
             name="write_file",
             arguments={"path": str(outside), "content": "blocked"},
@@ -306,13 +306,13 @@ def test_write_file_rejects_paths_outside_workspace(tmp_path) -> None:
     assert outside.exists() is False
 
 
-def test_write_file_rejects_symlink_escape(tmp_path) -> None:
+async def test_write_file_rejects_symlink_escape(tmp_path) -> None:
     registry = ToolRegistry([write_file])
     outside = tmp_path.parent / f"{tmp_path.name}-outside"
     outside.mkdir()
     (tmp_path / "link").symlink_to(outside, target_is_directory=True)
 
-    result = registry.execute(
+    result = await registry.execute(
         ToolCall(
             name="write_file",
             arguments={"path": "link/escaped.txt", "content": "blocked"},
@@ -325,7 +325,7 @@ def test_write_file_rejects_symlink_escape(tmp_path) -> None:
     assert (outside / "escaped.txt").exists() is False
 
 
-def test_search_files_discovers_files_by_name(tmp_path) -> None:
+async def test_search_files_discovers_files_by_name(tmp_path) -> None:
     if which("rg") is None:
         pytest.skip("ripgrep is not installed")
 
@@ -334,7 +334,7 @@ def test_search_files_discovers_files_by_name(tmp_path) -> None:
     (tmp_path / "tools").mkdir()
     (tmp_path / "tools" / "workspace.py").write_text("", encoding="utf-8")
 
-    result = search_files.execute(
+    result = await search_files.execute(
         {"pattern": "models.py"},
         ExecutionContext(workspace=tmp_path),
     )
@@ -346,7 +346,7 @@ def test_search_files_discovers_files_by_name(tmp_path) -> None:
     assert result["truncated"] is False
 
 
-def test_search_files_supports_path_and_pagination(tmp_path) -> None:
+async def test_search_files_supports_path_and_pagination(tmp_path) -> None:
     if which("rg") is None:
         pytest.skip("ripgrep is not installed")
 
@@ -356,7 +356,7 @@ def test_search_files_supports_path_and_pagination(tmp_path) -> None:
     (src / "b.py").write_text("", encoding="utf-8")
     (tmp_path / "notes.py").write_text("", encoding="utf-8")
 
-    result = search_files.execute(
+    result = await search_files.execute(
         {"pattern": "*.py", "path": "src", "limit": 1},
         ExecutionContext(workspace=tmp_path),
     )
@@ -367,12 +367,12 @@ def test_search_files_supports_path_and_pagination(tmp_path) -> None:
     assert result["truncated"] is True
 
 
-def test_search_files_rejects_paths_outside_workspace(tmp_path) -> None:
+async def test_search_files_rejects_paths_outside_workspace(tmp_path) -> None:
     registry = ToolRegistry([search_files])
     outside = tmp_path.parent / "outside"
     outside.mkdir(exist_ok=True)
 
-    result = registry.execute(
+    result = await registry.execute(
         ToolCall(name="search_files", arguments={"pattern": "*", "path": str(outside)}),
         ExecutionContext(workspace=tmp_path),
     )
@@ -381,7 +381,7 @@ def test_search_files_rejects_paths_outside_workspace(tmp_path) -> None:
     assert "Path escapes workspace" in result.content
 
 
-def test_search_files_finds_content_matches(tmp_path) -> None:
+async def test_search_files_finds_content_matches(tmp_path) -> None:
     if which("rg") is None:
         pytest.skip("ripgrep is not installed")
 
@@ -391,7 +391,7 @@ def test_search_files_finds_content_matches(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    result = search_files.execute(
+    result = await search_files.execute(
         {"pattern": "ToolRegistry", "target": "content"},
         ExecutionContext(workspace=tmp_path),
     )
@@ -405,7 +405,7 @@ def test_search_files_finds_content_matches(tmp_path) -> None:
     assert result["truncated"] is False
 
 
-def test_search_files_content_supports_path_and_pagination(tmp_path) -> None:
+async def test_search_files_content_supports_path_and_pagination(tmp_path) -> None:
     if which("rg") is None:
         pytest.skip("ripgrep is not installed")
 
@@ -415,7 +415,7 @@ def test_search_files_content_supports_path_and_pagination(tmp_path) -> None:
     (src / "b.py").write_text("needle two\n", encoding="utf-8")
     (tmp_path / "notes.py").write_text("needle ignored\n", encoding="utf-8")
 
-    result = search_files.execute(
+    result = await search_files.execute(
         {"pattern": "needle", "target": "content", "path": "src", "limit": 1},
         ExecutionContext(workspace=tmp_path),
     )
@@ -426,18 +426,18 @@ def test_search_files_content_supports_path_and_pagination(tmp_path) -> None:
     assert result["truncated"] is True
 
 
-def test_search_files_stops_after_page_lookahead(tmp_path) -> None:
+async def test_search_files_stops_after_page_lookahead(tmp_path) -> None:
     if which("rg") is None:
         pytest.skip("ripgrep is not installed")
 
     for name in ("a.py", "b.py", "c.py", "d.py"):
         (tmp_path / name).write_text("needle\n", encoding="utf-8")
 
-    files_result = search_files.execute(
+    files_result = await search_files.execute(
         {"pattern": "*.py", "limit": 1},
         ExecutionContext(workspace=tmp_path),
     )
-    content_result = search_files.execute(
+    content_result = await search_files.execute(
         {"pattern": "needle", "target": "content", "limit": 1},
         ExecutionContext(workspace=tmp_path),
     )
@@ -446,15 +446,13 @@ def test_search_files_stops_after_page_lookahead(tmp_path) -> None:
     assert files_result["total_count"] == 2
     assert files_result["total_count_is_exact"] is False
     assert files_result["truncated"] is True
-    assert content_result["matches"] == [
-        {"path": "a.py", "line": 1, "text": "needle"}
-    ]
+    assert content_result["matches"] == [{"path": "a.py", "line": 1, "text": "needle"}]
     assert content_result["total_count"] == 2
     assert content_result["total_count_is_exact"] is False
     assert content_result["truncated"] is True
 
 
-def test_search_files_bounds_long_matching_lines(tmp_path) -> None:
+async def test_search_files_bounds_long_matching_lines(tmp_path) -> None:
     if which("rg") is None:
         pytest.skip("ripgrep is not installed")
 
@@ -463,7 +461,7 @@ def test_search_files_bounds_long_matching_lines(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    result = search_files.execute(
+    result = await search_files.execute(
         {"pattern": "needle", "target": "content"},
         ExecutionContext(workspace=tmp_path),
     )

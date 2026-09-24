@@ -16,6 +16,7 @@ fi
 cd "$repo_root"
 
 uv run python - "$workspace" "${paths[@]}" <<'PY'
+import asyncio
 import json
 import sys
 from dataclasses import asdict
@@ -27,12 +28,12 @@ from tools.registry import ToolRegistry
 from tools.workspace import read_many
 
 
-def main() -> None:
+async def main() -> None:
     workspace = Path(sys.argv[1])
     paths = sys.argv[2:]
 
     registry = ToolRegistry([read_many])
-    result = registry.execute(
+    result = await registry.execute(
         ToolCall(
             name="read_many",
             arguments={"paths": paths},
@@ -43,5 +44,5 @@ def main() -> None:
     print(json.dumps(asdict(result), indent=2))
 
 
-main()
+asyncio.run(main())
 PY
