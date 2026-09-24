@@ -31,7 +31,7 @@ class FakeProvider:
     def model_limits(self, model: str | None = None) -> ModelLimits:
         return self._model_limits
 
-    def generate(self, request: ProviderRequest) -> ProviderResponse:
+    async def generate(self, request: ProviderRequest) -> ProviderResponse:
         if self.closed:
             raise RuntimeError("Provider is closed")
 
@@ -44,5 +44,5 @@ class FakeProvider:
             return ProviderResponse.message(response)
         return response
 
-    def close(self) -> None:
+    async def close(self) -> None:
         self.closed = True
