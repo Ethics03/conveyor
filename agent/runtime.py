@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from dataclasses import dataclass, field
@@ -22,6 +23,14 @@ from tools.base import ExecutionContext
 from tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
+RUNTIME_SHUTDOWN_REASON = "Runtime is shutting down"
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveTurn:
+    cancellation: CancellationToken
+    task: asyncio.Task[object]
+    loop: asyncio.AbstractEventLoop
 
 
 @dataclass(slots=True)
@@ -34,7 +43,7 @@ class Runtime:
     workspace: Path
     context: ExecutionContext = field(init=False)
     _closed: bool = field(default=False, init=False, repr=False)
-    _active_turns: dict[str, CancellationToken] = field(
+    _active_turns: dict[str, _ActiveTurn] = field(
         default_factory=dict,
         init=False,
         repr=False,
@@ -55,14 +64,14 @@ class Runtime:
         if self._closed:
             raise RuntimeError("Runtime is closed")
 
-    def create_session(self, title: str | None = None) -> Session:
+    async def create_session(self, title: str | None = None) -> Session:
         self._ensure_open()
         session = (
             Session()
             if title is None
             else Session(title=clean_session_title(title), title_source="user")
         )
-        self.store.save_session(session)
+        await self.store.save_session(session)
         return session
 
     def interrupt_session(
@@ -73,30 +82,39 @@ class Runtime:
         """Request cancellation of the active turn without closing its session."""
         self._ensure_open()
         with self._active_turns_lock:
-            cancellation = self._active_turns.get(session_id)
-        if cancellation is None:
+            active_turn = self._active_turns.get(session_id)
+        if active_turn is None:
             return False
-        _ = cancellation.cancel(reason)
+        _ = active_turn.cancellation.cancel(reason)
+        active_turn.loop.call_soon_threadsafe(active_turn.task.cancel, reason)
         return True
 
-    def _begin_turn(self, session_id: str) -> CancellationToken:
+    def _begin_turn(self, session_id: str) -> _ActiveTurn:
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("run_turn requires an active asyncio task")
         cancellation = CancellationToken()
+        active_turn = _ActiveTurn(
+            cancellation=cancellation,
+            task=task,
+            loop=asyncio.get_running_loop(),
+        )
         with self._active_turns_lock:
             if session_id in self._active_turns:
                 raise RuntimeError(f"Session already has an active turn: {session_id}")
-            self._active_turns[session_id] = cancellation
-        return cancellation
+            self._active_turns[session_id] = active_turn
+        return active_turn
 
     def _end_turn(
         self,
         session_id: str,
-        cancellation: CancellationToken,
+        active_turn: _ActiveTurn,
     ) -> None:
         with self._active_turns_lock:
-            if self._active_turns.get(session_id) is cancellation:
+            if self._active_turns.get(session_id) is active_turn:
                 del self._active_turns[session_id]
 
-    def run_turn(
+    async def run_turn(
         self,
         *,
         agent: Agent,
@@ -108,50 +126,52 @@ class Runtime:
         if not content.strip():
             raise ValueError("Message content cannot be empty")
 
-        persisted_session = self.store.get_session(session.id)
+        persisted_session = await self.store.get_session(session.id)
         if persisted_session is None:
             raise ValueError(f"Session does not exist: {session.id}")
         if persisted_session.status != "active":
             raise ValueError(f"Session is not active: {session.id}")
 
-        cancellation = self._begin_turn(persisted_session.id)
+        active_turn = self._begin_turn(persisted_session.id)
         try:
             user_message = Message(
                 session_id=persisted_session.id,
                 role="user",
                 content=content,
             )
-            self.store.save_message(user_message)
-            self.store.append_event(
-                Event(
-                    type="message.created",
-                    session_id=persisted_session.id,
-                    message_id=user_message.id,
-                    payload={"role": user_message.role},
-                )
+            await self.store.save_message_with_events(
+                user_message,
+                [
+                    Event(
+                        type="message.created",
+                        session_id=persisted_session.id,
+                        message_id=user_message.id,
+                        payload={"role": user_message.role},
+                    )
+                ],
             )
 
-            outcome = run_agent(
+            outcome = await run_agent(
                 agent=agent,
                 session=persisted_session,
                 provider=self.provider,
                 registry=self.registry,
                 context=ExecutionContext(
                     workspace=self.workspace,
-                    cancellation=cancellation,
+                    cancellation=active_turn.cancellation,
                 ),
                 store=self.store,
                 approval_callback=approval_callback,
             )
         finally:
-            self._end_turn(persisted_session.id, cancellation)
+            self._end_turn(persisted_session.id, active_turn)
 
         if (
             persisted_session.title_source == "default"
             and outcome.run.status == "finished"
             and outcome.final_message is not None
         ):
-            self._title_session(
+            await self._title_session(
                 agent=agent,
                 session=session,
                 user_message=content,
@@ -159,7 +179,7 @@ class Runtime:
             )
         return outcome
 
-    def _title_session(
+    async def _title_session(
         self,
         *,
         agent: Agent,
@@ -173,18 +193,20 @@ class Runtime:
 
         title = fallback
         try:
-            title = generate_session_title(
+            title = await generate_session_title(
                 self.provider,
                 user_message=user_message,
                 assistant_response=assistant_response,
                 model=agent.model,
             )
         except Exception:
-            logger.warning("Session title generation failed; using fallback", exc_info=True)
+            logger.warning(
+                "Session title generation failed; using fallback", exc_info=True
+            )
 
         try:
-            updated = self.store.set_auto_title(session.id, title)
-            persisted = self.store.get_session(session.id) if updated else None
+            updated = await self.store.set_auto_title(session.id, title)
+            persisted = await self.store.get_session(session.id) if updated else None
         except Exception:
             logger.warning("Session title persistence failed", exc_info=True)
             return
@@ -194,24 +216,41 @@ class Runtime:
             session.title_source = persisted.title_source
             session.updated_at = persisted.updated_at
 
-    def __enter__(self) -> Self:
+    async def __aenter__(self) -> Self:
         self._ensure_open()
         return self
 
-    def __exit__(
+    async def __aexit__(
         self,
         exc_type: type[BaseException] | None,
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        self.close()
+        await self.close()
 
-    def close(self) -> None:
+    async def close(self) -> None:
         if self._closed:
             return
 
         self._closed = True
+        current_task = asyncio.current_task()
+        with self._active_turns_lock:
+            active_turns = list(self._active_turns.values())
+
+        for active_turn in active_turns:
+            _ = active_turn.cancellation.cancel(RUNTIME_SHUTDOWN_REASON)
+            if active_turn.task is not current_task:
+                active_turn.task.cancel(RUNTIME_SHUTDOWN_REASON)
+
+        pending = [
+            active_turn.task
+            for active_turn in active_turns
+            if active_turn.task is not current_task
+        ]
+        if pending:
+            _ = await asyncio.gather(*pending, return_exceptions=True)
+
         try:
-            self.provider.close()
+            await self.provider.close()
         finally:
-            self.store.close()
+            await self.store.close()

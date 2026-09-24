@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import tempfile
@@ -42,7 +43,7 @@ def _title_snapshot(session: Session) -> dict[str, str]:
     }
 
 
-def main() -> None:
+async def main() -> None:
     parser = argparse.ArgumentParser(
         description="Smoke-test automatic and user session title precedence"
     )
@@ -97,17 +98,17 @@ def main() -> None:
     )
 
     try:
-        with Runtime(
-            store=Store(database),
+        async with Runtime(
+            store=await Store.open(database),
             provider=provider,
             registry=ToolRegistry(),
             workspace=Path.cwd(),
         ) as runtime:
-            session = runtime.create_session()
-            initial = runtime.store.get_session(session.id)
+            session = await runtime.create_session()
+            initial = await runtime.store.get_session(session.id)
             assert initial is not None
 
-            outcome = runtime.run_turn(
+            outcome = await runtime.run_turn(
                 agent=Agent(
                     name="Session title smoke agent",
                     instructions="Answer the user concisely.",
@@ -116,34 +117,36 @@ def main() -> None:
                 session=session,
                 content=args.message,
             )
-            automatic = runtime.store.get_session(session.id)
+            automatic = await runtime.store.get_session(session.id)
             assert outcome.run.status == "finished"
             assert automatic is not None
             assert automatic.title_source == "auto"
             assert session == automatic
 
-            user_updated = runtime.store.set_session_title(session.id, args.user_title)
-            user = runtime.store.get_session(session.id)
+            user_updated = await runtime.store.set_session_title(
+                session.id, args.user_title
+            )
+            user = await runtime.store.get_session(session.id)
             assert user_updated is True
             assert user is not None
             assert user.title_source == "user"
 
-            late_auto_updated = runtime.store.set_auto_title(
+            late_auto_updated = await runtime.store.set_auto_title(
                 session.id,
                 "This automatic title must not win",
             )
-            final = runtime.store.get_session(session.id)
+            final = await runtime.store.get_session(session.id)
             assert late_auto_updated is False
             assert final is not None
             assert final.title == user.title
             assert final.title_source == "user"
 
-        reopened_store = Store(database)
+        reopened_store = await Store.open(database)
         try:
-            reopened = reopened_store.get_session(session.id)
+            reopened = await reopened_store.get_session(session.id)
             assert reopened == final
         finally:
-            reopened_store.close()
+            await reopened_store.close()
 
         print(
             json.dumps(
@@ -182,4 +185,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

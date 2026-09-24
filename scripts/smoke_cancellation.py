@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import shlex
 import tempfile
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 from agent.models import (
@@ -46,15 +46,15 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _wait_for_process(marker: Path, future: Future[RunOutcome]) -> int:
+async def _wait_for_process(marker: Path, turn: asyncio.Task[RunOutcome]) -> int:
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         if marker.exists():
             return int(marker.read_text().strip())
-        if future.done():
-            _ = future.result()
+        if turn.done():
+            _ = turn.result()
             raise RuntimeError("Agent turn finished before Bash started")
-        time.sleep(0.02)
+        await asyncio.sleep(0.02)
     raise TimeoutError("Bash did not start within 5 seconds")
 
 
@@ -72,7 +72,7 @@ def _approve_smoke_command(_: ApprovalRequest) -> ApprovalDecision:
     return "approved"
 
 
-def main() -> None:
+async def main() -> None:
     args = parse_args()
     workspace = args.workspace.expanduser().resolve()
     if not workspace.is_dir():
@@ -85,8 +85,7 @@ def main() -> None:
         database = temporary / "runtime.db"
         process_marker = temporary / "process.pid"
         command = (
-            f"printf '%s' \"$$\" > {shlex.quote(str(process_marker))}; "
-            f"{args.command}"
+            f"printf '%s' \"$$\" > {shlex.quote(str(process_marker))}; {args.command}"
         )
         provider = FakeProvider(
             [
@@ -103,45 +102,47 @@ def main() -> None:
             ]
         )
 
-        with Runtime(
-            store=Store(database),
+        async with Runtime(
+            store=await Store.open(database),
             provider=provider,
             registry=ToolRegistry([bash]),
             workspace=workspace,
         ) as runtime:
-            session = runtime.create_session("Cancellation smoke test")
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(
-                    runtime.run_turn,
+            session = await runtime.create_session("Cancellation smoke test")
+
+            turn = asyncio.create_task(
+                runtime.run_turn(
                     agent=Agent(name="Cancellation agent", tools=["bash"]),
                     session=session,
                     content="Run the command and wait for it to finish.",
                     approval_callback=_approve_smoke_command,
                 )
-                process_id = _wait_for_process(process_marker, future)
-                time.sleep(args.cancel_after)
+            )
 
-                cancelled_at = time.monotonic()
-                interrupt_accepted = runtime.interrupt_session(
-                    session.id,
-                    "Stopped by cancellation smoke test",
-                )
-                outcome = future.result(timeout=5)
-                cancellation_seconds = time.monotonic() - cancelled_at
+            process_id = await _wait_for_process(process_marker, turn)
+            await asyncio.sleep(args.cancel_after)
 
-            continuation = runtime.run_turn(
+            cancelled_at = time.monotonic()
+            interrupt_accepted = runtime.interrupt_session(
+                session.id,
+                "Stopped by cancellation smoke test",
+            )
+            outcome = await asyncio.wait_for(turn, timeout=5)
+            cancellation_seconds = time.monotonic() - cancelled_at
+
+            continuation = await runtime.run_turn(
                 agent=Agent(name="Cancellation agent", tools=["bash"]),
                 session=session,
                 content="Continue after the cancelled command.",
             )
 
-        verified = Store(database)
+        verified = await Store.open(database)
         try:
-            persisted_session = verified.get_session(session.id)
-            events = verified.list_events(run_id=outcome.run.id)
-            messages = verified.list_messages(session.id)
+            persisted_session = await verified.get_session(session.id)
+            events = await verified.list_events(run_id=outcome.run.id)
+            messages = await verified.list_messages(session.id)
         finally:
-            verified.close()
+            await verified.close()
 
         process_alive = _process_exists(process_id)
         assert interrupt_accepted
@@ -184,4 +185,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

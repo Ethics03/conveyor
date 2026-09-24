@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 from dataclasses import asdict
@@ -11,6 +12,7 @@ from agent.models import (
     ApprovalDecision,
     ApprovalRequest,
     Event,
+    Message,
     Session,
 )
 from agent.runtime import Runtime
@@ -20,8 +22,8 @@ from tools.defaults import build_default_registry
 
 
 class ConsoleStore(Store):
-    def append_event(self, event: Event) -> None:
-        super().append_event(event)
+    @staticmethod
+    def _print_event(event: Event) -> None:
         if event.type == "tool.started":
             name = event.payload.get("name", "unknown")
             arguments = json.dumps(event.payload.get("arguments", {}))
@@ -30,6 +32,19 @@ class ConsoleStore(Store):
             name = event.payload.get("name", "unknown")
             status = "ok" if event.payload.get("ok") else "failed"
             print(f"tool> finished {name} ({status})")
+
+    async def append_event(self, event: Event) -> None:
+        await super().append_event(event)
+        self._print_event(event)
+
+    async def save_message_with_events(
+        self,
+        message: Message,
+        events: list[Event],
+    ) -> None:
+        await super().save_message_with_events(message, events)
+        for event in events:
+            self._print_event(event)
 
 
 def prompt_for_approval(approval: ApprovalRequest) -> ApprovalDecision:
@@ -50,8 +65,8 @@ def prompt_for_approval(approval: ApprovalRequest) -> ApprovalDecision:
         print("answer with y or n")
 
 
-def print_messages(store: Store, session: Session) -> None:
-    for message in store.list_messages(session.id):
+async def print_messages(store: Store, session: Session) -> None:
+    for message in await store.list_messages(session.id):
         content = message.content
         if message.tool_calls:
             calls = ", ".join(call.name for call in message.tool_calls)
@@ -59,16 +74,16 @@ def print_messages(store: Store, session: Session) -> None:
         print(f"{message.role}> {content}")
 
 
-def print_events(store: Store, session: Session) -> None:
-    for event in store.list_events(session_id=session.id):
+async def print_events(store: Store, session: Session) -> None:
+    for event in await store.list_events(session_id=session.id):
         print(json.dumps(asdict(event), default=str))
 
 
-def resolve_session(runtime: Runtime, session_id: str | None) -> Session:
+async def resolve_session(runtime: Runtime, session_id: str | None) -> Session:
     if session_id is None:
-        return runtime.create_session()
+        return await runtime.create_session()
 
-    session = runtime.store.get_session(session_id)
+    session = await runtime.store.get_session(session_id)
     if session is None:
         raise ValueError(f"Session does not exist: {session_id}")
     if session.status != "active":
@@ -76,7 +91,7 @@ def resolve_session(runtime: Runtime, session_id: str | None) -> Session:
     return session
 
 
-def main() -> None:
+async def main() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description="Run an interactive Conveyor agent")
     parser.add_argument(
@@ -119,14 +134,14 @@ def main() -> None:
     )
 
     try:
-        with Runtime(
-            store=ConsoleStore(database),
+        async with Runtime(
+            store=await ConsoleStore.open(database),
             provider=AnthropicProvider(),
             registry=registry,
             workspace=workspace,
         ) as runtime:
             try:
-                session = resolve_session(runtime, args.resume)
+                session = await resolve_session(runtime, args.resume)
             except ValueError as exc:
                 parser.error(str(exc))
 
@@ -136,7 +151,7 @@ def main() -> None:
             print("commands: /messages, /events, /exit")
             if args.resume:
                 print("\nhistory:")
-                print_messages(runtime.store, session)
+                await print_messages(runtime.store, session)
 
             while True:
                 try:
@@ -149,15 +164,15 @@ def main() -> None:
                 if prompt in {"/exit", "/quit"}:
                     break
                 if prompt == "/messages":
-                    print_messages(runtime.store, session)
+                    await print_messages(runtime.store, session)
                     continue
                 if prompt == "/events":
-                    print_events(runtime.store, session)
+                    await print_events(runtime.store, session)
                     continue
 
                 title_before_turn = session.title
                 try:
-                    outcome = runtime.run_turn(
+                    outcome = await runtime.run_turn(
                         agent=agent,
                         session=session,
                         content=prompt,
@@ -178,4 +193,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

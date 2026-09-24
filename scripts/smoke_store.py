@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import tempfile
@@ -35,7 +36,7 @@ def _remove_database(path: Path) -> None:
         candidate.unlink(missing_ok=True)
 
 
-def main() -> None:
+async def main() -> None:
     parser = argparse.ArgumentParser(description="Smoke-test the durable SQLite store")
     parser.add_argument(
         "database",
@@ -76,16 +77,16 @@ def main() -> None:
     )
 
     try:
-        store = Store(database)
-        store.save_session(session)
-        store.save_run(run)
-        store.append_event(
+        store = await Store.open(database)
+        await store.save_session(session)
+        await store.save_run(run)
+        await store.append_event(
             Event(type="run.started", session_id=session.id, run_id=run.id)
         )
-        store.save_message(message)
+        await store.save_message(message)
 
         run.status = "blocked"
-        store.block_run(
+        await store.block_run(
             run=run,
             approvals=[approval],
             events=[
@@ -111,17 +112,17 @@ def main() -> None:
                 ),
             ],
         )
-        persisted_run = store.get_run(run.id)
-        persisted_approval = store.get_approval(approval.id)
+        persisted_run = await store.get_run(run.id)
+        persisted_approval = await store.get_approval(approval.id)
         assert persisted_run is not None and persisted_run.status == "blocked"
         assert persisted_approval is not None
         assert persisted_approval.status == "pending"
         assert persisted_approval.tool_call == tool_call
 
-        resolved = store.resolve_approval(approval.id, args.decision)
+        resolved = await store.resolve_approval(approval.id, args.decision)
         run.status = "running"
         run.updated_at = utc_now()
-        store.resume_run(
+        await store.resume_run(
             run=run,
             event=Event(
                 type="run.resumed",
@@ -131,14 +132,14 @@ def main() -> None:
                 payload={"approval_ids": [approval.id]},
             ),
         )
-        store.close()
+        await store.close()
 
-        verified = Store(database)
-        final_run = verified.get_run(run.id)
-        final_approval = verified.get_approval(approval.id)
-        events = verified.list_events(run_id=run.id)
-        messages = verified.list_messages(session.id)
-        verified.close()
+        verified = await Store.open(database)
+        final_run = await verified.get_run(run.id)
+        final_approval = await verified.get_approval(approval.id)
+        events = await verified.list_events(run_id=run.id)
+        messages = await verified.list_messages(session.id)
+        await verified.close()
 
         assert final_approval == resolved
         assert final_approval is not None
@@ -179,4 +180,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

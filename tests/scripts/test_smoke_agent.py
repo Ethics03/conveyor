@@ -10,21 +10,25 @@ from storage.store import Store
 from tools.registry import ToolRegistry
 
 
-def test_resolve_session_creates_session_by_default(tmp_path: Path) -> None:
-    with Runtime(Store(), FakeProvider(), ToolRegistry(), tmp_path) as runtime:
-        session = resolve_session(runtime, None)
+async def test_resolve_session_creates_session_by_default(tmp_path: Path) -> None:
+    async with Runtime(
+        await Store.open(), FakeProvider(), ToolRegistry(), tmp_path
+    ) as runtime:
+        session = await resolve_session(runtime, None)
 
         assert session.title == "New session"
         assert session.title_source == "default"
-        assert runtime.store.get_session(session.id) == session
+        assert await runtime.store.get_session(session.id) == session
 
 
-def test_resolve_session_loads_persisted_session(tmp_path: Path) -> None:
-    with Runtime(Store(), FakeProvider(), ToolRegistry(), tmp_path) as runtime:
-        session = runtime.create_session("Existing session")
+async def test_resolve_session_loads_persisted_session(tmp_path: Path) -> None:
+    async with Runtime(
+        await Store.open(), FakeProvider(), ToolRegistry(), tmp_path
+    ) as runtime:
+        session = await runtime.create_session("Existing session")
 
-        assert resolve_session(runtime, session.id) == session
-        assert runtime.store.list_sessions() == [session]
+        assert await resolve_session(runtime, session.id) == session
+        assert await runtime.store.list_sessions() == [session]
 
 
 @pytest.mark.parametrize(
@@ -34,14 +38,16 @@ def test_resolve_session_loads_persisted_session(tmp_path: Path) -> None:
         (Session(status="archived"), "Session is not active"),
     ],
 )
-def test_resolve_session_rejects_unavailable_session(
+async def test_resolve_session_rejects_unavailable_session(
     tmp_path: Path,
     session: Session,
     error: str,
 ) -> None:
-    with Runtime(Store(), FakeProvider(), ToolRegistry(), tmp_path) as runtime:
+    async with Runtime(
+        await Store.open(), FakeProvider(), ToolRegistry(), tmp_path
+    ) as runtime:
         if session.status == "archived":
-            runtime.store.save_session(session)
+            await runtime.store.save_session(session)
 
         with pytest.raises(ValueError, match=error):
-            resolve_session(runtime, session.id)
+            await resolve_session(runtime, session.id)

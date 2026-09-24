@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import time
 from dataclasses import asdict
@@ -28,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
+async def main() -> None:
     args = parse_args()
     if args.delay <= 0:
         raise ValueError("--delay must be greater than zero")
@@ -58,10 +59,10 @@ def main() -> None:
     def read_beta() -> str:
         return run_synthetic_read("read_beta")
 
-    store = Store(":memory:")
+    store = await Store.open(":memory:")
     session = Session(title="parallel tool smoke test")
-    store.save_session(session)
-    store.save_message(
+    await store.save_session(session)
+    await store.save_message(
         Message(
             session_id=session.id,
             role="user",
@@ -83,7 +84,7 @@ def main() -> None:
     )
 
     started_at = time.monotonic()
-    outcome = run_agent(
+    outcome = await run_agent(
         agent=Agent(tools=["read_alpha", "read_beta"]),
         session=session,
         provider=provider,
@@ -95,13 +96,11 @@ def main() -> None:
 
     tool_messages = [
         message
-        for message in store.list_messages(session.id)
+        for message in await store.list_messages(session.id)
         if message.role == "tool"
     ]
     starts = [timings[name]["started_at"] for name in ["read_alpha", "read_beta"]]
-    finishes = [
-        timings[name]["finished_at"] for name in ["read_alpha", "read_beta"]
-    ]
+    finishes = [timings[name]["finished_at"] for name in ["read_alpha", "read_beta"]]
     overlap = max(starts) < min(finishes)
 
     if outcome.run.status != "finished":
@@ -124,7 +123,8 @@ def main() -> None:
                 "result_order": [message.name for message in tool_messages],
                 "results": [asdict(message) for message in tool_messages],
                 "events": [
-                    event.type for event in store.list_events(run_id=outcome.run.id)
+                    event.type
+                    for event in await store.list_events(run_id=outcome.run.id)
                 ],
             },
             indent=2,
@@ -134,4 +134,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

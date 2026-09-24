@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from concurrent.futures import Future, ThreadPoolExecutor
+import asyncio
 from typing import Literal
 
 from agent.approvals import (
@@ -10,7 +10,11 @@ from agent.approvals import (
     PolicyDecision,
     ToolCallDecision,
 )
-from agent.cancellation import CancellationToken, RunCancelled
+from agent.cancellation import (
+    DEFAULT_CANCELLATION_REASON,
+    CancellationToken,
+    RunCancelled,
+)
 from agent.context import ContextBudget, ContextPlan, plan_context
 from agent.models import (
     Agent,
@@ -36,7 +40,7 @@ MAX_PARALLEL_TOOL_WORKERS = 8
 ToolLifecycleEvent = Literal["tool.finished", "tool.cancelled"]
 
 
-def _start_run(
+async def _start_run(
     *,
     agent: Agent,
     session: Session,
@@ -50,20 +54,22 @@ def _start_run(
         status="running",
     )
 
-    store.save_run(run)
-    store.append_event(
-        Event(
-            type="run.started",
-            session_id=session.id,
-            run_id=run.id,
-            payload={"agent_id": agent.id},
-        )
+    await store.save_run_with_events(
+        run,
+        [
+            Event(
+                type="run.started",
+                session_id=session.id,
+                run_id=run.id,
+                payload={"agent_id": agent.id},
+            )
+        ],
     )
 
     return run
 
 
-def _plan_provider_request(
+async def _plan_provider_request(
     *,
     agent: Agent,
     session: Session,
@@ -91,7 +97,7 @@ def _plan_provider_request(
     plan.request.metadata["context_plan"] = telemetry
 
     if plan.compaction_triggered:
-        store.append_event(
+        await store.append_event(
             Event(
                 type="context.compaction_planned",
                 session_id=session.id,
@@ -121,7 +127,7 @@ def _context_plan_telemetry(
     }
 
 
-def _save_assistant_message(
+async def _save_assistant_message(
     *,
     response: ProviderResponse,
     session: Session,
@@ -142,8 +148,7 @@ def _save_assistant_message(
         metadata=metadata,
     )
 
-    store.save_message(message)
-    store.append_event(
+    events = [
         Event(
             type="message.created",
             session_id=session.id,
@@ -154,13 +159,13 @@ def _save_assistant_message(
                 "tool_call_count": len(message.tool_calls),
             },
         )
-    )
+    ]
     if response.replay_state is not None:
         compaction_items = sum(
             item.get("type") == "compaction" for item in response.replay_state.items
         )
         if compaction_items:
-            store.append_event(
+            events.append(
                 Event(
                     type="context.compacted",
                     session_id=session.id,
@@ -172,6 +177,7 @@ def _save_assistant_message(
                     },
                 )
             )
+    await store.save_message_with_events(message, events)
     return message
 
 
@@ -229,7 +235,7 @@ def _preflight_tool_calls(
     return decisions
 
 
-def _block_run(
+async def _block_run(
     *,
     run: Run,
     final_message: Message,
@@ -285,11 +291,11 @@ def _block_run(
             },
         )
     )
-    store.block_run(run=run, approvals=approvals, events=events)
+    await store.block_run(run=run, approvals=approvals, events=events)
     return approvals
 
 
-def _request_approvals(
+async def _request_approvals(
     *,
     run: Run,
     final_message: Message,
@@ -299,7 +305,7 @@ def _request_approvals(
     callback: ApprovalCallback | None,
     cancellation: CancellationToken,
 ) -> dict[str, ApprovalRequest]:
-    approvals = _block_run(
+    approvals = await _block_run(
         run=run,
         final_message=final_message,
         decisions=decisions,
@@ -310,20 +316,24 @@ def _request_approvals(
     try:
         for approval in approvals:
             cancellation.raise_if_cancelled()
-            choice = callback(approval) if callback is not None else "denied"
+            choice = (
+                await asyncio.to_thread(callback, approval)
+                if callback is not None
+                else "denied"
+            )
             cancellation.raise_if_cancelled()
-            resolved.append(store.resolve_approval(approval.id, choice))
+            resolved.append(await store.resolve_approval(approval.id, choice))
     except Exception:
         resolved_ids = {approval.id for approval in resolved}
         for approval in approvals:
             if approval.id not in resolved_ids:
-                _ = store.resolve_approval(approval.id, "denied")
+                _ = await store.resolve_approval(approval.id, "denied")
         raise
 
     run.status = "running"
     run.error = None
     run.updated_at = utc_now()
-    store.resume_run(
+    await store.resume_run(
         run=run,
         event=Event(
             type="run.resumed",
@@ -341,7 +351,7 @@ def _request_approvals(
     return {approval.tool_call.id: approval for approval in resolved}
 
 
-def _deny_tool_call(
+async def _deny_tool_call(
     *,
     decision: ToolCallDecision,
     session: Session,
@@ -370,25 +380,27 @@ def _deny_tool_call(
         metadata=metadata,
     )
 
-    store.save_message(message)
-    store.append_event(
-        Event(
-            type="message.created",
-            session_id=session.id,
-            run_id=run.id,
-            message_id=message.id,
-            payload={
-                "role": message.role,
-                "name": message.name,
-                "ok": False,
-                "policy_action": "deny",
-            },
-        )
+    await store.save_message_with_events(
+        message,
+        [
+            Event(
+                type="message.created",
+                session_id=session.id,
+                run_id=run.id,
+                message_id=message.id,
+                payload={
+                    "role": message.role,
+                    "name": message.name,
+                    "ok": False,
+                    "policy_action": "deny",
+                },
+            )
+        ],
     )
     return message
 
 
-def _execute_tool_call(
+async def _execute_tool_call(
     *,
     tool_call: ToolCall,
     session: Session,
@@ -398,15 +410,15 @@ def _execute_tool_call(
     store: Store,
 ) -> Message:
     context.cancellation.raise_if_cancelled()
-    _record_tool_started(
+    await _record_tool_started(
         tool_call=tool_call,
         session=session,
         run=run,
         store=store,
     )
-    result = registry.execute(tool_call, context)
+    result = await registry.execute(tool_call, context)
     context.cancellation.raise_if_cancelled()
-    return _save_tool_result(
+    return await _save_tool_result(
         result=result,
         session=session,
         run=run,
@@ -414,14 +426,14 @@ def _execute_tool_call(
     )
 
 
-def _record_tool_started(
+async def _record_tool_started(
     *,
     tool_call: ToolCall,
     session: Session,
     run: Run,
     store: Store,
 ) -> None:
-    store.append_event(
+    await store.append_event(
         Event(
             type="tool.started",
             session_id=session.id,
@@ -435,7 +447,7 @@ def _record_tool_started(
     )
 
 
-def _save_tool_message(
+async def _save_tool_message(
     *,
     message: Message,
     ok: bool,
@@ -443,33 +455,33 @@ def _save_tool_message(
     lifecycle_payload: dict[str, object],
     store: Store,
 ) -> Message:
-    store.save_message(message)
-    store.append_event(
-        Event(
-            type="message.created",
-            session_id=message.session_id,
-            run_id=message.run_id,
-            message_id=message.id,
-            payload={
-                "role": message.role,
-                "name": message.name,
-                "ok": ok,
-            },
-        )
-    )
-    store.append_event(
-        Event(
-            type=lifecycle_event,
-            session_id=message.session_id,
-            run_id=message.run_id,
-            message_id=message.id,
-            payload=lifecycle_payload,
-        )
+    await store.save_message_with_events(
+        message,
+        [
+            Event(
+                type="message.created",
+                session_id=message.session_id,
+                run_id=message.run_id,
+                message_id=message.id,
+                payload={
+                    "role": message.role,
+                    "name": message.name,
+                    "ok": ok,
+                },
+            ),
+            Event(
+                type=lifecycle_event,
+                session_id=message.session_id,
+                run_id=message.run_id,
+                message_id=message.id,
+                payload=lifecycle_payload,
+            ),
+        ],
     )
     return message
 
 
-def _save_tool_result(
+async def _save_tool_result(
     *,
     result: ToolResult,
     session: Session,
@@ -489,7 +501,7 @@ def _save_tool_result(
         metadata=metadata,
     )
 
-    return _save_tool_message(
+    return await _save_tool_message(
         message=message,
         ok=result.ok,
         lifecycle_event="tool.finished",
@@ -502,7 +514,7 @@ def _save_tool_result(
     )
 
 
-def _execute_parallel_tool_calls(
+async def _execute_parallel_tool_calls(
     *,
     tool_calls: list[ToolCall],
     session: Session,
@@ -514,7 +526,7 @@ def _execute_parallel_tool_calls(
     context.cancellation.raise_if_cancelled()
     if len(tool_calls) < 2:
         return [
-            _execute_tool_call(
+            await _execute_tool_call(
                 tool_call=tool_calls[0],
                 session=session,
                 run=run,
@@ -524,34 +536,43 @@ def _execute_parallel_tool_calls(
             )
         ]
 
-    max_workers = min(len(tool_calls), MAX_PARALLEL_TOOL_WORKERS)
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures: list[Future[ToolResult]] = []
-        for tool_call in tool_calls:
+    semaphore = asyncio.Semaphore(MAX_PARALLEL_TOOL_WORKERS)
+
+    async def execute(tool_call: ToolCall) -> ToolResult:
+        async with semaphore:
             context.cancellation.raise_if_cancelled()
-            _record_tool_started(
+            await _record_tool_started(
                 tool_call=tool_call,
                 session=session,
                 run=run,
                 store=store,
             )
-            futures.append(executor.submit(registry.execute, tool_call, context))
+            return await registry.execute(tool_call, context)
 
-        results = [future.result() for future in futures]
+    tasks: list[asyncio.Task[ToolResult]] = []
+    try:
+        async with asyncio.TaskGroup() as group:
+            tasks = [group.create_task(execute(tool_call)) for tool_call in tool_calls]
+    except* RunCancelled as cancellations:
+        raise cancellations.exceptions[0]
+
+    results = [task.result() for task in tasks]
 
     context.cancellation.raise_if_cancelled()
-    return [
-        _save_tool_result(
-            result=result,
-            session=session,
-            run=run,
-            store=store,
+    messages: list[Message] = []
+    for result in results:
+        messages.append(
+            await _save_tool_result(
+                result=result,
+                session=session,
+                run=run,
+                store=store,
+            )
         )
-        for result in results
-    ]
+    return messages
 
 
-def _execute_tool_decisions(
+async def _execute_tool_decisions(
     *,
     decisions: list[ToolCallDecision],
     approvals_by_tool_call: dict[str, ApprovalRequest],
@@ -565,11 +586,11 @@ def _execute_tool_decisions(
     messages: list[Message] = []
     parallel_calls: list[ToolCall] = []
 
-    def flush_parallel_calls() -> None:
+    async def flush_parallel_calls() -> None:
         if not parallel_calls:
             return
         messages.extend(
-            _execute_parallel_tool_calls(
+            await _execute_parallel_tool_calls(
                 tool_calls=parallel_calls,
                 session=session,
                 run=run,
@@ -591,9 +612,9 @@ def _execute_tool_decisions(
         )
 
         if denied:
-            flush_parallel_calls()
+            await flush_parallel_calls()
             messages.append(
-                _deny_tool_call(
+                await _deny_tool_call(
                     decision=decision,
                     session=session,
                     run=run,
@@ -616,9 +637,9 @@ def _execute_tool_decisions(
             parallel_calls.append(decision.tool_call)
             continue
 
-        flush_parallel_calls()
+        await flush_parallel_calls()
         messages.append(
-            _execute_tool_call(
+            await _execute_tool_call(
                 tool_call=decision.tool_call,
                 session=session,
                 run=run,
@@ -628,11 +649,11 @@ def _execute_tool_decisions(
             )
         )
 
-    flush_parallel_calls()
+    await flush_parallel_calls()
     return messages
 
 
-def _finish_run(
+async def _finish_run(
     *,
     run: Run,
     final_message: Message,
@@ -643,15 +664,17 @@ def _finish_run(
     run.error = None
     run.updated_at = utc_now()
 
-    store.save_run(run)
-    store.append_event(
-        Event(
-            type="run.finished",
-            session_id=run.session_id,
-            run_id=run.id,
-            message_id=final_message.id,
-            payload={"iterations": iterations},
-        )
+    await store.save_run_with_events(
+        run,
+        [
+            Event(
+                type="run.finished",
+                session_id=run.session_id,
+                run_id=run.id,
+                message_id=final_message.id,
+                payload={"iterations": iterations},
+            )
+        ],
     )
 
     return RunOutcome(
@@ -661,7 +684,7 @@ def _finish_run(
     )
 
 
-def _fail_run(
+async def _fail_run(
     *,
     run: Run,
     error: str,
@@ -673,18 +696,20 @@ def _fail_run(
     run.error = error
     run.updated_at = utc_now()
 
-    store.save_run(run)
-    store.append_event(
-        Event(
-            type="run.failed",
-            session_id=run.session_id,
-            run_id=run.id,
-            message_id=final_message.id if final_message else None,
-            payload={
-                "error": error,
-                "iterations": iterations,
-            },
-        )
+    await store.save_run_with_events(
+        run,
+        [
+            Event(
+                type="run.failed",
+                session_id=run.session_id,
+                run_id=run.id,
+                message_id=final_message.id if final_message else None,
+                payload={
+                    "error": error,
+                    "iterations": iterations,
+                },
+            )
+        ],
     )
 
     return RunOutcome(
@@ -694,7 +719,7 @@ def _fail_run(
     )
 
 
-def _save_cancelled_tool_results(
+async def _save_cancelled_tool_results(
     *,
     run: Run,
     final_message: Message | None,
@@ -706,7 +731,7 @@ def _save_cancelled_tool_results(
 
     completed_tool_calls = {
         message.tool_call_id
-        for message in store.list_messages(run.session_id)
+        for message in await store.list_messages(run.session_id)
         if message.run_id == run.id
         and message.role == "tool"
         and message.tool_call_id is not None
@@ -723,7 +748,7 @@ def _save_cancelled_tool_results(
             tool_call_id=tool_call.id,
             metadata={"ok": False, "cancelled": True},
         )
-        _ = _save_tool_message(
+        _ = await _save_tool_message(
             message=cancelled_message,
             ok=False,
             lifecycle_event="tool.cancelled",
@@ -736,7 +761,7 @@ def _save_cancelled_tool_results(
         )
 
 
-def _cancel_run(
+async def _cancel_run(
     *,
     run: Run,
     reason: str,
@@ -744,7 +769,7 @@ def _cancel_run(
     store: Store,
     final_message: Message | None = None,
 ) -> RunOutcome:
-    _save_cancelled_tool_results(
+    await _save_cancelled_tool_results(
         run=run,
         final_message=final_message,
         reason=reason,
@@ -755,18 +780,20 @@ def _cancel_run(
     run.error = reason
     run.updated_at = utc_now()
 
-    store.save_run(run)
-    store.append_event(
-        Event(
-            type="run.cancelled",
-            session_id=run.session_id,
-            run_id=run.id,
-            message_id=final_message.id if final_message else None,
-            payload={
-                "reason": reason,
-                "iterations": iterations,
-            },
-        )
+    await store.save_run_with_events(
+        run,
+        [
+            Event(
+                type="run.cancelled",
+                session_id=run.session_id,
+                run_id=run.id,
+                message_id=final_message.id if final_message else None,
+                payload={
+                    "reason": reason,
+                    "iterations": iterations,
+                },
+            )
+        ],
     )
 
     return RunOutcome(
@@ -776,7 +803,7 @@ def _cancel_run(
     )
 
 
-def run_agent(
+async def run_agent(
     *,
     agent: Agent,
     session: Session,
@@ -793,12 +820,12 @@ def run_agent(
         raise ValueError("max_iterations must be at least 1")
 
     allowed_registry = registry.subset(agent.tools)
-    messages = store.list_messages(session.id)
+    messages = await store.list_messages(session.id)
     if not messages:
         raise ValueError("Cannot run an agent without session messages")
 
     approval_policy = policy if policy is not None else DefaultApprovalPolicy()
-    run = _start_run(
+    run = await _start_run(
         agent=agent,
         session=session,
         store=store,
@@ -811,7 +838,7 @@ def run_agent(
     try:
         for iterations in range(1, max_iterations + 1):
             context.cancellation.raise_if_cancelled()
-            request = _plan_provider_request(
+            request = await _plan_provider_request(
                 agent=agent,
                 session=session,
                 run=run,
@@ -822,10 +849,10 @@ def run_agent(
                 iteration=iterations,
             )
             context.cancellation.raise_if_cancelled()
-            response = provider.generate(request)
+            response = await provider.generate(request)
             context.cancellation.raise_if_cancelled()
 
-            final_message = _save_assistant_message(
+            final_message = await _save_assistant_message(
                 response=response,
                 session=session,
                 run=run,
@@ -835,7 +862,7 @@ def run_agent(
 
             response_error = _provider_response_error(response)
             if response_error is not None:
-                return _fail_run(
+                return await _fail_run(
                     run=run,
                     error=response_error,
                     iterations=iterations,
@@ -844,7 +871,7 @@ def run_agent(
                 )
 
             if not final_message.tool_calls:
-                return _finish_run(
+                return await _finish_run(
                     run=run,
                     final_message=final_message,
                     iterations=iterations,
@@ -859,7 +886,7 @@ def run_agent(
             )
             approvals_by_tool_call: dict[str, ApprovalRequest] = {}
             if any(item.decision.action == "ask" for item in decisions):
-                approvals_by_tool_call = _request_approvals(
+                approvals_by_tool_call = await _request_approvals(
                     run=run,
                     final_message=final_message,
                     decisions=decisions,
@@ -870,7 +897,7 @@ def run_agent(
                 )
 
             messages.extend(
-                _execute_tool_decisions(
+                await _execute_tool_decisions(
                     decisions=decisions,
                     approvals_by_tool_call=approvals_by_tool_call,
                     session=session,
@@ -883,15 +910,25 @@ def run_agent(
             )
 
     except RunCancelled as exc:
-        return _cancel_run(
+        return await _cancel_run(
             run=run,
             reason=str(exc),
             iterations=iterations,
             store=store,
             final_message=final_message,
         )
+    except asyncio.CancelledError:
+        if not context.cancellation.cancelled:
+            _ = context.cancellation.cancel(DEFAULT_CANCELLATION_REASON)
+        return await _cancel_run(
+            run=run,
+            reason=context.cancellation.reason,
+            iterations=iterations,
+            store=store,
+            final_message=final_message,
+        )
     except Exception as exc:
-        _ = _fail_run(
+        _ = await _fail_run(
             run=run,
             error=str(exc),
             iterations=iterations,
@@ -900,7 +937,7 @@ def run_agent(
         )
         raise
 
-    return _fail_run(
+    return await _fail_run(
         run=run,
         error=f"Maximum iterations exceeded: {max_iterations}",
         iterations=iterations,

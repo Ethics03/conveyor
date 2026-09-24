@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import tempfile
@@ -41,7 +42,7 @@ def _remove_database(path: Path) -> None:
         candidate.unlink(missing_ok=True)
 
 
-def _seed_transcript(
+async def _seed_transcript(
     store: Store,
     *,
     session_id: str,
@@ -59,7 +60,7 @@ def _seed_transcript(
             + "context " * word_count
             + f"End of historical turn {index + 1}."
         )
-        store.save_message(
+        await store.save_message(
             Message(
                 session_id=session_id,
                 role=role,
@@ -75,7 +76,7 @@ def _usage(message: Message | None) -> object:
     return message.metadata.get("usage") if message is not None else None
 
 
-def main() -> None:
+async def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Live-test Anthropic native compaction and durable checkpoint replay. "
@@ -148,15 +149,15 @@ def main() -> None:
             native_compaction=True,
             compaction_trigger_tokens=args.trigger_tokens,
         )
-        with Runtime(
-            store=Store(database),
+        async with Runtime(
+            store=await Store.open(database),
             provider=provider,
             registry=ToolRegistry(),
             workspace=Path.cwd(),
         ) as runtime:
-            session = runtime.create_session("Anthropic native compaction smoke")
+            session = await runtime.create_session("Anthropic native compaction smoke")
             session_id = session.id
-            stored_chars = _seed_transcript(
+            stored_chars = await _seed_transcript(
                 runtime.store,
                 session_id=session.id,
                 history_words=args.history_words,
@@ -171,7 +172,7 @@ def main() -> None:
                 model=args.model,
             )
 
-            first_outcome = runtime.run_turn(
+            first_outcome = await runtime.run_turn(
                 agent=agent,
                 session=session,
                 content="Reply with exactly COMPACTION_OK.",
@@ -191,7 +192,9 @@ def main() -> None:
             compaction_event = next(
                 (
                     event
-                    for event in runtime.store.list_events(run_id=first_outcome.run.id)
+                    for event in await runtime.store.list_events(
+                        run_id=first_outcome.run.id
+                    )
                     if event.type == "context.compacted"
                 ),
                 None,
@@ -200,7 +203,7 @@ def main() -> None:
                 raise RuntimeError("Compaction checkpoint was not recorded as an event")
             compaction_event_payload = dict(compaction_event.payload)
 
-            second_outcome = runtime.run_turn(
+            second_outcome = await runtime.run_turn(
                 agent=agent,
                 session=session,
                 content="Reply with exactly REPLAY_OK.",
@@ -208,9 +211,9 @@ def main() -> None:
             if second_outcome.final_message is None:
                 raise RuntimeError("Replay turn returned no final message")
 
-        reopened = Store(database)
+        reopened = await Store.open(database)
         try:
-            persisted_messages = reopened.list_messages(session_id)
+            persisted_messages = await reopened.list_messages(session_id)
             persisted_checkpoint = next(
                 (
                     ProviderReplayState.from_metadata(
@@ -225,7 +228,7 @@ def main() -> None:
             if persisted_checkpoint != checkpoint:
                 raise RuntimeError("Persisted compaction checkpoint did not round-trip")
         finally:
-            reopened.close()
+            await reopened.close()
 
         assert first_outcome is not None
         assert first_outcome.final_message is not None
@@ -272,4 +275,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

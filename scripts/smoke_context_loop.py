@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from pathlib import Path
 
@@ -13,7 +14,7 @@ from storage.store import Store
 from tools.registry import ToolRegistry
 
 
-def main() -> None:
+async def main() -> None:
     parser = argparse.ArgumentParser(
         description="Smoke-test context planning at the agent loop boundary",
     )
@@ -29,13 +30,15 @@ def main() -> None:
             f"--payload-chars must be at least {MIN_CLEARABLE_TOOL_RESULT_CHARS}"
         )
 
-    store = Store()
+    store = await Store.open()
     provider = FakeProvider(
         [ProviderResponse.message("Compacted context accepted.")],
         model_limits=ModelLimits(12_000, 1_000),
     )
-    with Runtime(store, provider, ToolRegistry(), workspace=Path.cwd()) as runtime:
-        session = runtime.create_session("Context integration smoke")
+    async with Runtime(
+        store, provider, ToolRegistry(), workspace=Path.cwd()
+    ) as runtime:
+        session = await runtime.create_session("Context integration smoke")
         old_call = ToolCall(id="call_old", name="read_file")
         old_result = Message(
             session_id=session.id,
@@ -57,9 +60,9 @@ def main() -> None:
             Message(session_id=session.id, role="assistant", content="Recent answer"),
         ]
         for message in history:
-            store.save_message(message)
+            await store.save_message(message)
 
-        outcome = runtime.run_turn(
+        outcome = await runtime.run_turn(
             agent=Agent(name="Context smoke agent"),
             session=session,
             content="Continue from the current state.",
@@ -72,12 +75,12 @@ def main() -> None:
         )
         persisted_result = next(
             message
-            for message in store.list_messages(session.id)
+            for message in await store.list_messages(session.id)
             if message.id == old_result.id
         )
         compaction_event = next(
             event
-            for event in store.list_events(run_id=outcome.run.id)
+            for event in await store.list_events(run_id=outcome.run.id)
             if event.type == "context.compaction_planned"
         )
 
@@ -112,4 +115,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

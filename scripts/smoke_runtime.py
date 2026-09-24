@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import tempfile
@@ -29,7 +30,7 @@ def _remove_database(path: Path) -> None:
         candidate.unlink(missing_ok=True)
 
 
-def main() -> None:
+async def main() -> None:
     parser = argparse.ArgumentParser(description="Smoke-test Runtime.run_turn")
     parser.add_argument(
         "--workspace",
@@ -55,27 +56,27 @@ def main() -> None:
     provider = FakeProvider(["Runtime turn completed."])
 
     try:
-        with Runtime(
-            store=Store(database),
+        async with Runtime(
+            store=await Store.open(database),
             provider=provider,
             registry=ToolRegistry(),
             workspace=workspace,
         ) as runtime:
-            session = runtime.create_session("Runtime smoke test")
-            outcome = runtime.run_turn(
+            session = await runtime.create_session("Runtime smoke test")
+            outcome = await runtime.run_turn(
                 agent=Agent(name="Runtime smoke agent"),
                 session=session,
                 content=args.message,
             )
 
-        verified = Store(database)
+        verified = await Store.open(database)
         try:
-            persisted_session = verified.get_session(session.id)
-            messages = verified.list_messages(session.id)
-            runs = verified.list_runs(session.id)
-            events = verified.list_events(session_id=session.id)
+            persisted_session = await verified.get_session(session.id)
+            messages = await verified.list_messages(session.id)
+            runs = await verified.list_runs(session.id)
+            events = await verified.list_events(session_id=session.id)
         finally:
-            verified.close()
+            await verified.close()
 
         assert persisted_session == session
         assert runs == [outcome.run]
@@ -110,4 +111,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
