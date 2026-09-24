@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import AsyncIterator
 from typing import cast
 
 import pytest
@@ -21,119 +22,152 @@ from storage.store import Store
 
 
 @pytest.fixture
-def store() -> Store:
-    return Store(":memory:")
+async def store() -> AsyncIterator[Store]:
+    opened = await Store.open(":memory:")
+    try:
+        yield opened
+    finally:
+        await opened.close()
 
 
-def test_session_roundtrip(store: Store) -> None:
+async def test_session_roundtrip(store: Store) -> None:
     session = Session(title="hello", title_source="user")
-    store.save_session(session)
+    await store.save_session(session)
 
-    loaded = store.get_session(session.id)
+    loaded = await store.get_session(session.id)
     assert loaded == session
 
 
-def test_session_upsert_updates(store: Store) -> None:
+async def test_session_upsert_updates(store: Store) -> None:
     session = Session(title="before")
-    store.save_session(session)
+    await store.save_session(session)
 
     session.title = "after"
     session.status = "archived"
-    store.save_session(session)
+    await store.save_session(session)
 
-    loaded = store.get_session(session.id)
+    loaded = await store.get_session(session.id)
     assert loaded is not None
     assert loaded.title == "before"
     assert loaded.status == "archived"
-    assert len(store.list_sessions()) == 1
+    assert len(await store.list_sessions()) == 1
 
 
-def test_auto_title_only_replaces_default_title(store: Store) -> None:
+async def test_auto_title_only_replaces_default_title(store: Store) -> None:
     session = Session()
-    store.save_session(session)
+    await store.save_session(session)
 
-    assert store.set_auto_title(session.id, "  Fix   provider timeout ") is True
-    loaded = store.get_session(session.id)
+    assert await store.set_auto_title(session.id, "  Fix   provider timeout ") is True
+    loaded = await store.get_session(session.id)
     assert loaded is not None
     assert loaded.title == "Fix provider timeout"
     assert loaded.title_source == "auto"
-    assert store.set_auto_title(session.id, "Replace it again") is False
-    unchanged = store.get_session(session.id)
+    assert await store.set_auto_title(session.id, "Replace it again") is False
+    unchanged = await store.get_session(session.id)
     assert unchanged is not None
     assert unchanged.title == "Fix provider timeout"
 
 
-def test_user_title_replaces_auto_title_and_cannot_be_overwritten(store: Store) -> None:
+async def test_user_title_replaces_auto_title_and_cannot_be_overwritten(
+    store: Store,
+) -> None:
     session = Session()
-    store.save_session(session)
-    assert store.set_auto_title(session.id, "Automatic title") is True
+    await store.save_session(session)
+    assert await store.set_auto_title(session.id, "Automatic title") is True
 
-    assert store.set_session_title(session.id, "User title") is True
-    assert store.set_auto_title(session.id, "Late automatic title") is False
+    assert await store.set_session_title(session.id, "User title") is True
+    assert await store.set_auto_title(session.id, "Late automatic title") is False
 
-    loaded = store.get_session(session.id)
+    loaded = await store.get_session(session.id)
     assert loaded is not None
     assert loaded.title == "User title"
     assert loaded.title_source == "user"
 
 
-def test_set_session_title_returns_false_for_unknown_session(store: Store) -> None:
-    assert store.set_session_title("ses_missing", "Missing") is False
+async def test_set_session_title_returns_false_for_unknown_session(
+    store: Store,
+) -> None:
+    assert await store.set_session_title("ses_missing", "Missing") is False
 
 
-def test_store_can_be_used_from_worker_thread(store: Store) -> None:
+async def test_store_methods_are_awaitable(store: Store) -> None:
     session = Session(title="worker")
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        saved = executor.submit(store.save_session, session)
-        saved.result()
-        loaded = executor.submit(store.get_session, session.id).result()
+    await store.save_session(session)
+    loaded = await store.get_session(session.id)
 
     assert loaded == session
 
 
-def test_store_serializes_concurrent_writes(store: Store) -> None:
+async def test_store_serializes_concurrent_writes(store: Store) -> None:
     sessions = [Session(title=f"worker-{index}") for index in range(20)]
 
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = [executor.submit(store.save_session, session) for session in sessions]
-        for future in futures:
-            future.result()
+    await asyncio.gather(*(store.save_session(session) for session in sessions))
 
-    assert store.list_sessions() == sessions
+    assert await store.list_sessions() == sessions
 
 
-def test_run_roundtrip_with_parent(store: Store) -> None:
+async def test_cancelled_write_settles_before_returning(
+    store: Store,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     session = Session()
-    store.save_session(session)
-    parent = Run(session_id=session.id, agent_id="agent_1")
-    store.save_run(parent)
-    child = Run(session_id=session.id, agent_id="agent_1", parent_run_id=parent.id)
-    store.save_run(child)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    insert_session = store._execute
 
-    loaded = store.get_run(child.id)
+    async def delayed_execute(
+        statement: str,
+        parameters: tuple[object, ...] = (),
+    ) -> int:
+        if "INSERT INTO sessions" in statement:
+            started.set()
+            await release.wait()
+        return await insert_session(statement, parameters)
+
+    monkeypatch.setattr(store, "_execute", delayed_execute)
+    save = asyncio.create_task(store.save_session(session))
+    await started.wait()
+    save.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await save
+
+    assert await store.get_session(session.id) == session
+
+
+async def test_run_roundtrip_with_parent(store: Store) -> None:
+    session = Session()
+    await store.save_session(session)
+    parent = Run(session_id=session.id, agent_id="agent_1")
+    await store.save_run(parent)
+    child = Run(session_id=session.id, agent_id="agent_1", parent_run_id=parent.id)
+    await store.save_run(child)
+
+    loaded = await store.get_run(child.id)
     assert loaded is not None
     assert loaded == child
     assert loaded.parent_run_id == parent.id
-    assert store.list_runs(session.id) == [parent, child]
+    assert await store.list_runs(session.id) == [parent, child]
 
 
-def test_message_ordering_and_metadata(store: Store) -> None:
+async def test_message_ordering_and_metadata(store: Store) -> None:
     session = Session()
-    store.save_session(session)
+    await store.save_session(session)
     first = Message(session_id=session.id, role="user", content="hi", metadata={"a": 1})
     second = Message(session_id=session.id, role="assistant", content="hello")
-    store.save_message(first)
-    store.save_message(second)
+    await store.save_message(first)
+    await store.save_message(second)
 
-    loaded = store.list_messages(session.id)
+    loaded = await store.list_messages(session.id)
     assert loaded == [first, second]
     assert loaded[0].metadata == {"a": 1}
 
 
-def test_tool_messages_roundtrip(store: Store) -> None:
+async def test_tool_messages_roundtrip(store: Store) -> None:
     session = Session()
-    store.save_session(session)
+    await store.save_session(session)
     tool_call = ToolCall(
         id="call_readme",
         name="read_file",
@@ -153,39 +187,39 @@ def test_tool_messages_roundtrip(store: Store) -> None:
         tool_call_id=tool_call.id,
     )
 
-    store.save_message(assistant)
-    store.save_message(tool_result)
+    await store.save_message(assistant)
+    await store.save_message(tool_result)
 
-    assert store.list_messages(session.id) == [assistant, tool_result]
+    assert await store.list_messages(session.id) == [assistant, tool_result]
 
 
-def test_events_append_and_filter(store: Store) -> None:
+async def test_events_append_and_filter(store: Store) -> None:
     session = Session()
-    store.save_session(session)
+    await store.save_session(session)
     run = Run(session_id=session.id, agent_id="agent_1")
-    store.save_run(run)
+    await store.save_run(run)
 
     session_event = Event(type="session.created", session_id=session.id)
     run_event = Event(type="run.started", session_id=session.id, run_id=run.id)
-    store.append_event(session_event)
-    store.append_event(run_event)
+    await store.append_event(session_event)
+    await store.append_event(run_event)
 
-    assert store.list_events(session_id=session.id) == [session_event, run_event]
-    assert store.list_events(run_id=run.id) == [run_event]
+    assert await store.list_events(session_id=session.id) == [session_event, run_event]
+    assert await store.list_events(run_id=run.id) == [run_event]
 
 
-def test_event_foreign_keys_enforced(store: Store) -> None:
+async def test_event_foreign_keys_enforced(store: Store) -> None:
     import sqlite3
 
     with pytest.raises(sqlite3.IntegrityError):
-        store.append_event(Event(type="run.started", run_id="run_missing"))
+        await store.append_event(Event(type="run.started", run_id="run_missing"))
 
 
-def test_approval_roundtrip(store: Store) -> None:
+async def test_approval_roundtrip(store: Store) -> None:
     session = Session()
-    store.save_session(session)
+    await store.save_session(session)
     run = Run(session_id=session.id, agent_id="agent_1")
-    store.save_run(run)
+    await store.save_run(run)
 
     approval = ApprovalRequest(
         session_id=session.id,
@@ -193,9 +227,9 @@ def test_approval_roundtrip(store: Store) -> None:
         tool_call=ToolCall(name="run_command", arguments={"command": "rm -rf /tmp/x"}),
         reason="dangerous tool",
     )
-    store.save_approval(approval)
+    await store.save_approval(approval)
 
-    loaded = store.get_approval(approval.id)
+    loaded = await store.get_approval(approval.id)
     assert loaded is not None
     assert loaded == approval
     assert loaded.status == "pending"
@@ -204,14 +238,14 @@ def test_approval_roundtrip(store: Store) -> None:
 
 
 @pytest.mark.parametrize("status", ["approved", "denied"])
-def test_save_approval_rejects_resolved_status(
+async def test_save_approval_rejects_resolved_status(
     store: Store,
     status: ApprovalStatus,
 ) -> None:
     session = Session()
-    store.save_session(session)
+    await store.save_session(session)
     run = Run(session_id=session.id, agent_id="agent_1")
-    store.save_run(run)
+    await store.save_run(run)
     approval = ApprovalRequest(
         session_id=session.id,
         run_id=run.id,
@@ -220,14 +254,14 @@ def test_save_approval_rejects_resolved_status(
     )
 
     with pytest.raises(ValueError, match="must have pending status"):
-        store.save_approval(approval)
+        await store.save_approval(approval)
 
 
-def test_save_approval_rejects_resolved_at(store: Store) -> None:
+async def test_save_approval_rejects_resolved_at(store: Store) -> None:
     session = Session()
-    store.save_session(session)
+    await store.save_session(session)
     run = Run(session_id=session.id, agent_id="agent_1")
-    store.save_run(run)
+    await store.save_run(run)
     approval = ApprovalRequest(
         session_id=session.id,
         run_id=run.id,
@@ -236,14 +270,14 @@ def test_save_approval_rejects_resolved_at(store: Store) -> None:
     )
 
     with pytest.raises(ValueError, match="cannot have resolved_at"):
-        store.save_approval(approval)
+        await store.save_approval(approval)
 
 
-def test_block_run_rolls_back_all_state_on_failure(store: Store) -> None:
+async def test_block_run_rolls_back_all_state_on_failure(store: Store) -> None:
     session = Session()
-    store.save_session(session)
+    await store.save_session(session)
     run = Run(session_id=session.id, agent_id="agent_1", status="running")
-    store.save_run(run)
+    await store.save_run(run)
     approval = ApprovalRequest(
         session_id=session.id,
         run_id=run.id,
@@ -254,7 +288,7 @@ def test_block_run_rolls_back_all_state_on_failure(store: Store) -> None:
     duplicate_id = "evt_duplicate"
 
     with pytest.raises(sqlite3.IntegrityError):
-        store.block_run(
+        await store.block_run(
             run=run,
             approvals=[approval],
             events=[
@@ -263,64 +297,64 @@ def test_block_run_rolls_back_all_state_on_failure(store: Store) -> None:
             ],
         )
 
-    persisted_run = store.get_run(run.id)
+    persisted_run = await store.get_run(run.id)
     assert persisted_run is not None
     assert persisted_run.status == "running"
-    assert store.list_approvals(run_id=run.id) == []
-    assert store.list_events(run_id=run.id) == []
+    assert await store.list_approvals(run_id=run.id) == []
+    assert await store.list_events(run_id=run.id) == []
 
 
-def test_resume_run_updates_state_and_appends_event(store: Store) -> None:
+async def test_resume_run_updates_state_and_appends_event(store: Store) -> None:
     session = Session()
-    store.save_session(session)
+    await store.save_session(session)
     run = Run(session_id=session.id, agent_id="agent_1", status="blocked")
-    store.save_run(run)
+    await store.save_run(run)
     run.status = "running"
     event = Event(type="run.resumed", session_id=session.id, run_id=run.id)
 
-    store.resume_run(run=run, event=event)
+    await store.resume_run(run=run, event=event)
 
-    assert store.get_run(run.id) == run
-    assert store.list_events(run_id=run.id) == [event]
+    assert await store.get_run(run.id) == run
+    assert await store.list_events(run_id=run.id) == [event]
 
 
-def test_resume_run_rejects_non_blocked_run(store: Store) -> None:
+async def test_resume_run_rejects_non_blocked_run(store: Store) -> None:
     session = Session()
-    store.save_session(session)
+    await store.save_session(session)
     run = Run(session_id=session.id, agent_id="agent_1", status="running")
-    store.save_run(run)
+    await store.save_run(run)
 
     with pytest.raises(ValueError, match="is not blocked"):
-        store.resume_run(
+        await store.resume_run(
             run=run,
             event=Event(type="run.resumed", run_id=run.id),
         )
 
-    assert store.list_events(run_id=run.id) == []
+    assert await store.list_events(run_id=run.id) == []
 
 
 @pytest.mark.parametrize("decision", ["approved", "denied"])
-def test_resolve_approval_is_atomic_and_idempotent(
+async def test_resolve_approval_is_atomic_and_idempotent(
     store: Store,
     decision: ApprovalDecision,
 ) -> None:
     session = Session()
-    store.save_session(session)
+    await store.save_session(session)
     run = Run(session_id=session.id, agent_id="agent_1")
-    store.save_run(run)
+    await store.save_run(run)
     approval = ApprovalRequest(
         session_id=session.id,
         run_id=run.id,
         tool_call=ToolCall(name="write_file"),
     )
-    store.save_approval(approval)
+    await store.save_approval(approval)
 
-    resolved = store.resolve_approval(approval.id, decision)
+    resolved = await store.resolve_approval(approval.id, decision)
 
     assert resolved.status == decision
     assert resolved.resolved_at is not None
-    assert store.resolve_approval(approval.id, decision) == resolved
-    events = store.list_events(run_id=run.id)
+    assert await store.resolve_approval(approval.id, decision) == resolved
+    events = await store.list_events(run_id=run.id)
     assert len(events) == 1
     assert events[0].type == "approval.resolved"
     assert events[0].payload == {
@@ -329,49 +363,47 @@ def test_resolve_approval_is_atomic_and_idempotent(
         "tool_call_id": approval.tool_call.id,
     }
 
-    conflicting: ApprovalDecision = (
-        "denied" if decision == "approved" else "approved"
-    )
+    conflicting: ApprovalDecision = "denied" if decision == "approved" else "approved"
     with pytest.raises(ValueError, match=f"already resolved as {decision}"):
-        _ = store.resolve_approval(approval.id, conflicting)
+        _ = await store.resolve_approval(approval.id, conflicting)
 
-    assert store.get_approval(approval.id) == resolved
+    assert await store.get_approval(approval.id) == resolved
 
 
-def test_resolve_approval_rejects_unknown_id(store: Store) -> None:
+async def test_resolve_approval_rejects_unknown_id(store: Store) -> None:
     with pytest.raises(KeyError, match="Unknown approval: appr_missing"):
-        _ = store.resolve_approval("appr_missing", "approved")
+        _ = await store.resolve_approval("appr_missing", "approved")
 
 
-def test_resolve_approval_rejects_invalid_decision(store: Store) -> None:
+async def test_resolve_approval_rejects_invalid_decision(store: Store) -> None:
     session = Session()
-    store.save_session(session)
+    await store.save_session(session)
     run = Run(session_id=session.id, agent_id="agent_1")
-    store.save_run(run)
+    await store.save_run(run)
     approval = ApprovalRequest(
         session_id=session.id,
         run_id=run.id,
         tool_call=ToolCall(name="write_file"),
     )
-    store.save_approval(approval)
+    await store.save_approval(approval)
 
     invalid = cast(ApprovalDecision, "invalid")
     with pytest.raises(ValueError, match="Invalid approval decision"):
-        _ = store.resolve_approval(approval.id, invalid)
+        _ = await store.resolve_approval(approval.id, invalid)
 
-    persisted = store.get_approval(approval.id)
+    persisted = await store.get_approval(approval.id)
     assert persisted is not None
     assert persisted.status == "pending"
-    assert store.list_events(run_id=run.id) == []
+    assert await store.list_events(run_id=run.id) == []
 
 
-def test_list_approvals_filters_by_run_and_status(store: Store) -> None:
+async def test_list_approvals_filters_by_run_and_status(store: Store) -> None:
     session = Session()
-    store.save_session(session)
+    await store.save_session(session)
     first_run = Run(session_id=session.id, agent_id="agent_1")
     second_run = Run(session_id=session.id, agent_id="agent_1")
-    store.save_run(first_run)
-    store.save_run(second_run)
+    await store.save_run(first_run)
+    await store.save_run(second_run)
 
     pending_first = ApprovalRequest(
         id="appr_a",
@@ -396,39 +428,39 @@ def test_list_approvals_filters_by_run_and_status(store: Store) -> None:
     )
     for approval in (pending_first, approved_first, pending_second):
         approval.created_at = pending_first.created_at
-        store.save_approval(approval)
-    approved_first = store.resolve_approval(approved_first.id, "approved")
+        await store.save_approval(approval)
+    approved_first = await store.resolve_approval(approved_first.id, "approved")
 
-    assert store.list_approvals() == [
+    assert await store.list_approvals() == [
         pending_first,
         approved_first,
         pending_second,
     ]
-    assert store.list_approvals(run_id=first_run.id) == [
+    assert await store.list_approvals(run_id=first_run.id) == [
         pending_first,
         approved_first,
     ]
-    assert store.list_approvals(status="pending") == [
+    assert await store.list_approvals(status="pending") == [
         pending_first,
         pending_second,
     ]
-    assert store.list_approvals(
+    assert await store.list_approvals(
         run_id=first_run.id,
         status="approved",
     ) == [approved_first]
 
 
-def test_persistence_across_reopen(tmp_path) -> None:
+async def test_persistence_across_reopen(tmp_path) -> None:
     db_path = tmp_path / "conveyor.db"
-    store = Store(db_path)
+    store = await Store.open(db_path)
     session = Session(title="durable")
-    store.save_session(session)
-    store.append_event(Event(type="session.created", session_id=session.id))
-    store.close()
+    await store.save_session(session)
+    await store.append_event(Event(type="session.created", session_id=session.id))
+    await store.close()
 
-    reopened = Store(db_path)
-    assert reopened.get_session(session.id) == session
-    events = reopened.list_events(session_id=session.id)
+    reopened = await Store.open(db_path)
+    assert await reopened.get_session(session.id) == session
+    events = await reopened.list_events(session_id=session.id)
     assert len(events) == 1
     assert events[0].type == "session.created"
-    reopened.close()
+    await reopened.close()

@@ -48,12 +48,13 @@ class ToolRegistry:
         if missing:
             raise ValueError(f"Unknown tools: {', '.join(missing)}")
 
-        return ToolRegistry(
-            self._tools[name]
-            for name in sorted(requested)
-        )
+        return ToolRegistry(self._tools[name] for name in sorted(requested))
 
-    def execute(self, tool_call: ToolCall, context: ExecutionContext) -> ToolResult:
+    async def execute(
+        self,
+        tool_call: ToolCall,
+        context: ExecutionContext,
+    ) -> ToolResult:
         tool = self.get(tool_call.name)
         if tool is None:
             return ToolResult(
@@ -64,10 +65,10 @@ class ToolRegistry:
             )
 
         try:
-            output = tool.execute(_json_object(tool_call.arguments), context)
+            output = await tool.execute(_json_object(tool_call.arguments), context)
         except RunCancelled:
             raise
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - tool failures become model-visible results
             return ToolResult(
                 tool_call_id=tool_call.id,
                 name=tool.name,
@@ -78,7 +79,9 @@ class ToolRegistry:
         return _successful_result(tool_call, tool, output)
 
 
-def _successful_result(tool_call: ToolCall, tool: Tool, output: ToolOutput) -> ToolResult:
+def _successful_result(
+    tool_call: ToolCall, tool: Tool, output: ToolOutput
+) -> ToolResult:
     return ToolResult(
         tool_call_id=tool_call.id,
         name=tool.name,

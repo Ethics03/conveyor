@@ -1,14 +1,14 @@
+import asyncio
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from sqlite3 import ProgrammingError
 from threading import Event
-from unittest.mock import Mock
+from unittest.mock import AsyncMock
 
 import pytest
 
 from agent.models import Agent, ProviderResponse, Session, ToolCall
 from agent.runtime import Runtime
+from providers.base import ModelLimits, ProviderRequest
 from providers.fake import FakeProvider
 from storage.store import Store
 from tools.base import ExecutionContext, tool
@@ -16,65 +16,77 @@ from tools.registry import ToolRegistry
 
 
 @pytest.mark.parametrize("title", [None, "Research notes"])
-def test_create_session_persists_after_reopen(tmp_path: Path, title: str | None) -> None:
+async def test_create_session_persists_after_reopen(
+    tmp_path: Path, title: str | None
+) -> None:
     database = tmp_path / "runtime.db"
     provider = FakeProvider()
-    with Runtime(Store(database), provider, ToolRegistry(), tmp_path) as runtime:
+    async with Runtime(
+        await Store.open(database), provider, ToolRegistry(), tmp_path
+    ) as runtime:
         session = (
-            runtime.create_session()
+            await runtime.create_session()
             if title is None
-            else runtime.create_session(title)
+            else await runtime.create_session(title)
         )
         assert session.title == ("New session" if title is None else title)
         assert session.title_source == ("default" if title is None else "user")
         assert session.status == "active"
         assert provider.requests == []
 
-    reopened = Store(database)
+    reopened = await Store.open(database)
     try:
-        assert reopened.get_session(session.id) == session
-        assert reopened.list_messages(session.id) == []
-        assert reopened.list_runs(session.id) == []
+        assert await reopened.get_session(session.id) == session
+        assert await reopened.list_messages(session.id) == []
+        assert await reopened.list_runs(session.id) == []
     finally:
-        reopened.close()
+        await reopened.close()
 
 
-def test_create_session_rejects_closed_runtime(tmp_path: Path) -> None:
+async def test_create_session_rejects_closed_runtime(tmp_path: Path) -> None:
     database = tmp_path / "runtime.db"
-    runtime = Runtime(Store(database), FakeProvider(), ToolRegistry(), tmp_path)
-    runtime.close()
+    runtime = Runtime(
+        await Store.open(database), FakeProvider(), ToolRegistry(), tmp_path
+    )
+    await runtime.close()
 
     with pytest.raises(RuntimeError, match="Runtime is closed"):
-        runtime.create_session("Too late")
+        await runtime.create_session("Too late")
 
-    reopened = Store(database)
+    reopened = await Store.open(database)
     try:
-        assert reopened.list_sessions() == []
+        assert await reopened.list_sessions() == []
     finally:
-        reopened.close()
+        await reopened.close()
 
 
-def test_create_session_propagates_storage_failure(
+async def test_create_session_propagates_storage_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    with Runtime(Store(), FakeProvider(), ToolRegistry(), tmp_path) as runtime:
+    async with Runtime(
+        await Store.open(), FakeProvider(), ToolRegistry(), tmp_path
+    ) as runtime:
         failure = OSError("storage unavailable")
-        monkeypatch.setattr(runtime.store, "save_session", Mock(side_effect=failure))
+        monkeypatch.setattr(
+            runtime.store,
+            "save_session",
+            AsyncMock(side_effect=failure),
+        )
 
         with pytest.raises(OSError) as raised:
-            runtime.create_session("Unsaved")
+            await runtime.create_session("Unsaved")
 
         assert raised.value is failure
-        assert runtime.store.list_sessions() == []
+        assert await runtime.store.list_sessions() == []
 
 
-def test_run_turn_persists_input_and_executes_agent(tmp_path: Path) -> None:
-    store = Store()
+async def test_run_turn_persists_input_and_executes_agent(tmp_path: Path) -> None:
+    store = await Store.open()
     provider = FakeProvider(["Hello from Conveyor"])
 
-    with Runtime(store, provider, ToolRegistry(), tmp_path) as runtime:
-        session = runtime.create_session("Runtime test")
-        outcome = runtime.run_turn(
+    async with Runtime(store, provider, ToolRegistry(), tmp_path) as runtime:
+        session = await runtime.create_session("Runtime test")
+        outcome = await runtime.run_turn(
             agent=Agent(name="Test agent"),
             session=session,
             content="  Keep this spacing.  ",
@@ -85,13 +97,13 @@ def test_run_turn_persists_input_and_executes_agent(tmp_path: Path) -> None:
         assert outcome.final_message is not None
         assert outcome.final_message.content == "Hello from Conveyor"
 
-        messages = store.list_messages(session.id)
+        messages = await store.list_messages(session.id)
         assert [message.role for message in messages] == ["user", "assistant"]
         assert messages[0].content == "  Keep this spacing.  "
         assert messages[0].run_id is None
         assert messages[1].run_id == outcome.run.id
 
-        events = store.list_events(session_id=session.id)
+        events = await store.list_events(session_id=session.id)
         assert [event.type for event in events] == [
             "message.created",
             "run.started",
@@ -106,7 +118,7 @@ def test_run_turn_persists_input_and_executes_agent(tmp_path: Path) -> None:
         assert len(provider.requests) == 1
 
 
-def test_interrupt_session_cancels_active_turn(tmp_path: Path) -> None:
+async def test_interrupt_session_cancels_active_turn(tmp_path: Path) -> None:
     tool_started = Event()
 
     @tool(permission="read")
@@ -116,7 +128,7 @@ def test_interrupt_session_cancels_active_turn(tmp_path: Path) -> None:
             context.cancellation.raise_if_cancelled()
             time.sleep(0.01)
 
-    store = Store()
+    store = await Store.open()
     provider = FakeProvider(
         [
             ProviderResponse(
@@ -128,23 +140,24 @@ def test_interrupt_session_cancels_active_turn(tmp_path: Path) -> None:
     )
     registry = ToolRegistry([wait_for_cancellation])
 
-    with Runtime(store, provider, registry, tmp_path) as runtime:
-        session = runtime.create_session("Cancellation test")
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(
-                runtime.run_turn,
+    async with Runtime(store, provider, registry, tmp_path) as runtime:
+        session = await runtime.create_session("Cancellation test")
+
+        turn = asyncio.create_task(
+            runtime.run_turn(
                 agent=Agent(tools=["wait_for_cancellation"]),
                 session=session,
                 content="Wait until I stop the turn.",
             )
-            assert tool_started.wait(timeout=1)
-            assert runtime.interrupt_session(session.id, "Stopped from Escape") is True
-            outcome = future.result(timeout=2)
+        )
+        assert await asyncio.to_thread(tool_started.wait, 1)
+        assert runtime.interrupt_session(session.id, "Stopped from Escape") is True
+        outcome = await asyncio.wait_for(turn, timeout=2)
 
         assert outcome.run.status == "cancelled"
         assert outcome.run.error == "Stopped from Escape"
         assert session.status == "active"
-        cancelled_messages = store.list_messages(session.id)
+        cancelled_messages = await store.list_messages(session.id)
         assert [message.role for message in cancelled_messages] == [
             "user",
             "assistant",
@@ -157,7 +170,9 @@ def test_interrupt_session_cancels_active_turn(tmp_path: Path) -> None:
             "ok": False,
             "cancelled": True,
         }
-        assert [event.type for event in store.list_events(run_id=outcome.run.id)] == [
+        assert [
+            event.type for event in await store.list_events(run_id=outcome.run.id)
+        ] == [
             "run.started",
             "message.created",
             "tool.started",
@@ -166,7 +181,7 @@ def test_interrupt_session_cancels_active_turn(tmp_path: Path) -> None:
             "run.cancelled",
         ]
 
-        continued = runtime.run_turn(
+        continued = await runtime.run_turn(
             agent=Agent(tools=["wait_for_cancellation"]),
             session=session,
             content="Continue with the next turn.",
@@ -181,13 +196,102 @@ def test_interrupt_session_cancels_active_turn(tmp_path: Path) -> None:
         assert runtime.interrupt_session(session.id) is False
 
 
-def test_run_turn_generates_title_for_default_session(tmp_path: Path) -> None:
-    store = Store()
+async def test_interrupt_session_cancels_provider_request(tmp_path: Path) -> None:
+    class WaitingProvider:
+        name = "waiting"
+
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.closed = False
+
+        def model_limits(self, model: str | None = None) -> ModelLimits:
+            return ModelLimits(200_000, 4_096)
+
+        async def generate(self, request: ProviderRequest) -> ProviderResponse:
+            self.started.set()
+            await asyncio.Event().wait()
+            return ProviderResponse.message("unreachable")
+
+        async def close(self) -> None:
+            self.closed = True
+
+    store = await Store.open()
+    provider = WaitingProvider()
+    async with Runtime(store, provider, ToolRegistry(), tmp_path) as runtime:
+        session = await runtime.create_session("Provider cancellation test")
+        turn = asyncio.create_task(
+            runtime.run_turn(
+                agent=Agent(),
+                session=session,
+                content="Wait for the provider.",
+            )
+        )
+
+        await asyncio.wait_for(provider.started.wait(), timeout=1)
+        assert runtime.interrupt_session(session.id, "Stop provider") is True
+        outcome = await asyncio.wait_for(turn, timeout=1)
+
+        assert outcome.run.status == "cancelled"
+        assert outcome.run.error == "Stop provider"
+        assert [
+            event.type for event in await store.list_events(run_id=outcome.run.id)
+        ] == [
+            "run.started",
+            "run.cancelled",
+        ]
+
+
+async def test_close_cancels_active_turn_before_closing_resources(
+    tmp_path: Path,
+) -> None:
+    class WaitingProvider:
+        name = "waiting"
+
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.closed = False
+
+        def model_limits(self, model: str | None = None) -> ModelLimits:
+            return ModelLimits(200_000, 4_096)
+
+        async def generate(self, request: ProviderRequest) -> ProviderResponse:
+            self.started.set()
+            await asyncio.Event().wait()
+            return ProviderResponse.message("unreachable")
+
+        async def close(self) -> None:
+            self.closed = True
+
+    store = await Store.open()
+    provider = WaitingProvider()
+    runtime = Runtime(store, provider, ToolRegistry(), tmp_path)
+    session = await runtime.create_session("Shutdown cancellation test")
+    turn = asyncio.create_task(
+        runtime.run_turn(
+            agent=Agent(),
+            session=session,
+            content="Wait for shutdown.",
+        )
+    )
+
+    await asyncio.wait_for(provider.started.wait(), timeout=1)
+    await runtime.close()
+    outcome = await asyncio.wait_for(turn, timeout=1)
+
+    assert outcome.run.status == "cancelled"
+    assert outcome.run.error == "Runtime is shutting down"
+    assert provider.closed is True
+    with pytest.raises(RuntimeError, match="Store is closed"):
+        await store.list_sessions()
+
+
+async def test_run_turn_generates_title_for_default_session(tmp_path: Path) -> None:
+    store = await Store.open()
     provider = FakeProvider(["Your interview is at 3 PM.", '"Interview Today"'])
 
-    with Runtime(store, provider, ToolRegistry(), tmp_path) as runtime:
-        session = runtime.create_session()
-        outcome = runtime.run_turn(
+    async with Runtime(store, provider, ToolRegistry(), tmp_path) as runtime:
+        session = await runtime.create_session()
+        outcome = await runtime.run_turn(
             agent=Agent(model="test-model"),
             session=session,
             content="Do I have an interview today?",
@@ -196,19 +300,21 @@ def test_run_turn_generates_title_for_default_session(tmp_path: Path) -> None:
         assert outcome.run.status == "finished"
         assert session.title == "Interview Today"
         assert session.title_source == "auto"
-        assert store.get_session(session.id) == session
+        assert await store.get_session(session.id) == session
         assert len(provider.requests) == 2
         assert provider.requests[1].metadata == {"purpose": "session_title"}
         assert provider.requests[1].model == "test-model"
 
 
-def test_run_turn_falls_back_when_generated_title_is_invalid(tmp_path: Path) -> None:
-    store = Store()
+async def test_run_turn_falls_back_when_generated_title_is_invalid(
+    tmp_path: Path,
+) -> None:
+    store = await Store.open()
     provider = FakeProvider(["I can help with that.", ""])
 
-    with Runtime(store, provider, ToolRegistry(), tmp_path) as runtime:
-        session = runtime.create_session()
-        outcome = runtime.run_turn(
+    async with Runtime(store, provider, ToolRegistry(), tmp_path) as runtime:
+        session = await runtime.create_session()
+        outcome = await runtime.run_turn(
             agent=Agent(),
             session=session,
             content="Debug the existing ingestion pipeline",
@@ -217,7 +323,7 @@ def test_run_turn_falls_back_when_generated_title_is_invalid(tmp_path: Path) -> 
         assert outcome.run.status == "finished"
         assert session.title == "Debug the existing ingestion pipeline"
         assert session.title_source == "auto"
-        assert store.get_session(session.id) == session
+        assert await store.get_session(session.id) == session
 
 
 @pytest.mark.parametrize(
@@ -227,115 +333,115 @@ def test_run_turn_falls_back_when_generated_title_is_invalid(tmp_path: Path) -> 
         (Session(status="archived"), "Session is not active"),
     ],
 )
-def test_run_turn_rejects_unavailable_session(
+async def test_run_turn_rejects_unavailable_session(
     tmp_path: Path,
     session: Session,
     error: str,
 ) -> None:
-    store = Store()
+    store = await Store.open()
     provider = FakeProvider()
 
-    with Runtime(store, provider, ToolRegistry(), tmp_path) as runtime:
+    async with Runtime(store, provider, ToolRegistry(), tmp_path) as runtime:
         if session.status == "archived":
-            store.save_session(session)
+            await store.save_session(session)
 
         with pytest.raises(ValueError, match=error):
-            runtime.run_turn(
+            await runtime.run_turn(
                 agent=Agent(),
                 session=session,
                 content="Hello",
             )
 
-        assert store.list_messages(session.id) == []
+        assert await store.list_messages(session.id) == []
         assert provider.requests == []
 
 
-def test_run_turn_rejects_empty_content(tmp_path: Path) -> None:
-    store = Store()
+async def test_run_turn_rejects_empty_content(tmp_path: Path) -> None:
+    store = await Store.open()
     provider = FakeProvider()
 
-    with Runtime(store, provider, ToolRegistry(), tmp_path) as runtime:
-        session = runtime.create_session()
+    async with Runtime(store, provider, ToolRegistry(), tmp_path) as runtime:
+        session = await runtime.create_session()
 
         with pytest.raises(ValueError, match="Message content cannot be empty"):
-            runtime.run_turn(agent=Agent(), session=session, content=" \n\t")
+            await runtime.run_turn(agent=Agent(), session=session, content=" \n\t")
 
-        assert store.list_messages(session.id) == []
+        assert await store.list_messages(session.id) == []
         assert provider.requests == []
 
 
-def test_run_turn_rejects_closed_runtime(tmp_path: Path) -> None:
-    runtime = Runtime(Store(), FakeProvider(), ToolRegistry(), tmp_path)
-    session = runtime.create_session()
-    runtime.close()
+async def test_run_turn_rejects_closed_runtime(tmp_path: Path) -> None:
+    runtime = Runtime(await Store.open(), FakeProvider(), ToolRegistry(), tmp_path)
+    session = await runtime.create_session()
+    await runtime.close()
 
     with pytest.raises(RuntimeError, match="Runtime is closed"):
-        runtime.run_turn(agent=Agent(), session=session, content="Hello")
+        await runtime.run_turn(agent=Agent(), session=session, content="Hello")
 
 
-def test_context_manager_closes_resources(tmp_path: Path) -> None:
-    store = Store()
+async def test_context_manager_closes_resources(tmp_path: Path) -> None:
+    store = await Store.open()
     provider = FakeProvider()
     runtime = Runtime(store, provider, ToolRegistry(), tmp_path)
 
-    with runtime as entered:
+    async with runtime as entered:
         assert entered is runtime
         assert provider.closed is False
-        assert store.list_sessions() == []
+        assert await store.list_sessions() == []
 
     assert provider.closed is True
-    with pytest.raises(ProgrammingError, match="closed database"):
-        store.list_sessions()
+    with pytest.raises(RuntimeError, match="Store is closed"):
+        await store.list_sessions()
 
 
-def test_context_manager_closes_resources_on_exception(tmp_path: Path) -> None:
-    store = Store()
+async def test_context_manager_closes_resources_on_exception(tmp_path: Path) -> None:
+    store = await Store.open()
     provider = FakeProvider()
     error = ValueError("turn failed")
 
-    with (
-        pytest.raises(ValueError) as raised,
-        Runtime(store, provider, ToolRegistry(), tmp_path),
-    ):
-        raise error
+    with pytest.raises(ValueError) as raised:
+        async with Runtime(store, provider, ToolRegistry(), tmp_path):
+            raise error
 
     assert raised.value is error
     assert provider.closed is True
-    with pytest.raises(ProgrammingError, match="closed database"):
-        store.list_sessions()
+    with pytest.raises(RuntimeError, match="Store is closed"):
+        await store.list_sessions()
 
 
-def test_closed_runtime_cannot_be_entered(tmp_path: Path) -> None:
-    runtime = Runtime(Store(), FakeProvider(), ToolRegistry(), tmp_path)
-    runtime.close()
+async def test_closed_runtime_cannot_be_entered(tmp_path: Path) -> None:
+    runtime = Runtime(await Store.open(), FakeProvider(), ToolRegistry(), tmp_path)
+    await runtime.close()
 
-    with pytest.raises(RuntimeError, match="Runtime is closed"), runtime:
-        pytest.fail("Closed runtime entered the block")
+    with pytest.raises(RuntimeError, match="Runtime is closed"):
+        async with runtime:
+            pytest.fail("Closed runtime entered the block")
 
 
 @pytest.mark.parametrize("close_fails", [False, True])
-def test_runtime_closes_store_once_even_if_provider_close_fails(
+async def test_runtime_closes_store_once_even_if_provider_close_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, close_fails: bool
 ) -> None:
-    store = Store()
+    store = await Store.open()
     provider = FakeProvider()
     runtime = Runtime(store, provider, ToolRegistry(), tmp_path)
-    provider_close = Mock(
+    provider_close = AsyncMock(
         side_effect=RuntimeError("provider close failed") if close_fails else None
     )
-    store_close = Mock(wraps=store.close)
+    store_close = AsyncMock(wraps=store.close)
     monkeypatch.setattr(provider, "close", provider_close)
     monkeypatch.setattr(store, "close", store_close)
 
     if close_fails:
-        with pytest.raises(RuntimeError, match="provider close failed"), runtime:
-            pass
+        with pytest.raises(RuntimeError, match="provider close failed"):
+            async with runtime:
+                pass
     else:
-        with runtime:
+        async with runtime:
             pass
 
-    runtime.close()
-    provider_close.assert_called_once_with()
-    store_close.assert_called_once_with()
-    with pytest.raises(ProgrammingError, match="closed database"):
-        store.list_sessions()
+    await runtime.close()
+    provider_close.assert_awaited_once_with()
+    store_close.assert_awaited_once_with()
+    with pytest.raises(RuntimeError, match="Store is closed"):
+        await store.list_sessions()

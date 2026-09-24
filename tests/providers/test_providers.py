@@ -20,11 +20,11 @@ from providers.base import ModelLimits, ProviderRequest
 from providers.fake import FakeProvider
 
 
-def test_anthropic_provider_repr_redacts_api_key() -> None:
+async def test_anthropic_provider_repr_redacts_api_key() -> None:
     provider = AnthropicProvider(api_key="secret-api-key")
 
     representation = repr(provider)
-    provider.close()
+    await provider.close()
 
     assert "secret-api-key" not in representation
     assert "api_key" not in representation
@@ -66,15 +66,15 @@ def test_anthropic_finish_reasons_are_normalized(
     assert _normalize_finish_reason(anthropic_reason) == conveyor_reason
 
 
-def test_fake_provider_rejects_requests_after_close() -> None:
+async def test_fake_provider_rejects_requests_after_close() -> None:
     provider = FakeProvider()
 
-    provider.close()
-    provider.close()
+    await provider.close()
+    await provider.close()
 
     assert provider.closed is True
     with pytest.raises(RuntimeError, match="Provider is closed"):
-        provider.generate(ProviderRequest(messages=[]))
+        await provider.generate(ProviderRequest(messages=[]))
 
 
 @pytest.mark.parametrize(
@@ -108,7 +108,7 @@ def test_anthropic_provider_reports_request_budget_limits(
         def __init__(self, **params: object) -> None:
             pass
 
-    monkeypatch.setattr("providers.anthropic_provider.Anthropic", FakeAnthropic)
+    monkeypatch.setattr("providers.anthropic_provider.AsyncAnthropic", FakeAnthropic)
     provider = AnthropicProvider(
         api_key="test-key",
         context_window_tokens=100_000,
@@ -118,7 +118,7 @@ def test_anthropic_provider_reports_request_budget_limits(
     assert provider.model_limits() == ModelLimits(100_000, 8_000)
 
 
-def test_anthropic_provider_enables_automatic_prompt_caching_by_default(
+async def test_anthropic_provider_enables_automatic_prompt_caching_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -131,7 +131,7 @@ def test_anthropic_provider_enables_automatic_prompt_caching_by_default(
     )
 
     class FakeMessages:
-        def create(self, **params: object) -> object:
+        async def create(self, **params: object) -> object:
             captured.update(params)
             return anthropic_response
 
@@ -139,15 +139,15 @@ def test_anthropic_provider_enables_automatic_prompt_caching_by_default(
         def __init__(self, **params: object) -> None:
             self.beta = SimpleNamespace(messages=FakeMessages())
 
-    monkeypatch.setattr("providers.anthropic_provider.Anthropic", FakeAnthropic)
-    AnthropicProvider(api_key="test-key").generate(
+    monkeypatch.setattr("providers.anthropic_provider.AsyncAnthropic", FakeAnthropic)
+    await AnthropicProvider(api_key="test-key").generate(
         ProviderRequest(messages=[ProviderMessage(role="user", content="Continue")])
     )
 
     assert captured["cache_control"] == {"type": "ephemeral"}
 
 
-def test_anthropic_provider_can_disable_automatic_prompt_caching(
+async def test_anthropic_provider_can_disable_automatic_prompt_caching(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -160,7 +160,7 @@ def test_anthropic_provider_can_disable_automatic_prompt_caching(
     )
 
     class FakeMessages:
-        def create(self, **params: object) -> object:
+        async def create(self, **params: object) -> object:
             captured.update(params)
             return anthropic_response
 
@@ -168,8 +168,8 @@ def test_anthropic_provider_can_disable_automatic_prompt_caching(
         def __init__(self, **params: object) -> None:
             self.beta = SimpleNamespace(messages=FakeMessages())
 
-    monkeypatch.setattr("providers.anthropic_provider.Anthropic", FakeAnthropic)
-    AnthropicProvider(api_key="test-key", prompt_caching=False).generate(
+    monkeypatch.setattr("providers.anthropic_provider.AsyncAnthropic", FakeAnthropic)
+    await AnthropicProvider(api_key="test-key", prompt_caching=False).generate(
         ProviderRequest(messages=[ProviderMessage(role="user", content="Continue")])
     )
 
@@ -289,7 +289,7 @@ def test_anthropic_messages_mark_failed_tool_results() -> None:
     ]
 
 
-def test_anthropic_provider_collects_multiple_tool_calls(
+async def test_anthropic_provider_collects_multiple_tool_calls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     anthropic_response = SimpleNamespace(
@@ -320,16 +320,16 @@ def test_anthropic_provider_collects_multiple_tool_calls(
     )
 
     class FakeMessages:
-        def create(self, **params: object) -> object:
+        async def create(self, **params: object) -> object:
             return anthropic_response
 
     class FakeAnthropic:
         def __init__(self, **params: object) -> None:
             self.beta = SimpleNamespace(messages=FakeMessages())
 
-    monkeypatch.setattr("providers.anthropic_provider.Anthropic", FakeAnthropic)
+    monkeypatch.setattr("providers.anthropic_provider.AsyncAnthropic", FakeAnthropic)
 
-    response = AnthropicProvider(api_key="test-key").generate(
+    response = await AnthropicProvider(api_key="test-key").generate(
         ProviderRequest(messages=[])
     )
 
@@ -356,7 +356,7 @@ def test_anthropic_provider_collects_multiple_tool_calls(
     }
 
 
-def test_anthropic_provider_reuses_and_closes_client(
+async def test_anthropic_provider_reuses_and_closes_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clients_created = 0
@@ -371,7 +371,7 @@ def test_anthropic_provider_reuses_and_closes_client(
     )
 
     class FakeMessages:
-        def create(self, **params: object) -> object:
+        async def create(self, **params: object) -> object:
             nonlocal requests_created
             requests_created += 1
             return anthropic_response
@@ -382,24 +382,24 @@ def test_anthropic_provider_reuses_and_closes_client(
             clients_created += 1
             self.beta = SimpleNamespace(messages=FakeMessages())
 
-        def close(self) -> None:
+        async def close(self) -> None:
             nonlocal client_closed
             client_closed = True
 
-    monkeypatch.setattr("providers.anthropic_provider.Anthropic", FakeAnthropic)
+    monkeypatch.setattr("providers.anthropic_provider.AsyncAnthropic", FakeAnthropic)
 
     provider = AnthropicProvider(api_key="test-key")
     request = ProviderRequest(messages=[])
-    provider.generate(request)
-    provider.generate(request)
-    provider.close()
+    await provider.generate(request)
+    await provider.generate(request)
+    await provider.close()
 
     assert clients_created == 1
     assert requests_created == 2
     assert client_closed is True
 
 
-def test_anthropic_provider_enables_native_compaction_before_local_fallback(
+async def test_anthropic_provider_enables_native_compaction_before_local_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -412,7 +412,7 @@ def test_anthropic_provider_enables_native_compaction_before_local_fallback(
     )
 
     class FakeMessages:
-        def create(self, **params: object) -> object:
+        async def create(self, **params: object) -> object:
             captured.update(params)
             return anthropic_response
 
@@ -420,9 +420,9 @@ def test_anthropic_provider_enables_native_compaction_before_local_fallback(
         def __init__(self, **params: object) -> None:
             self.beta = SimpleNamespace(messages=FakeMessages())
 
-    monkeypatch.setattr("providers.anthropic_provider.Anthropic", FakeAnthropic)
+    monkeypatch.setattr("providers.anthropic_provider.AsyncAnthropic", FakeAnthropic)
     provider = AnthropicProvider(api_key="test-key")
-    provider.generate(
+    await provider.generate(
         ProviderRequest(
             messages=[ProviderMessage(role="user", content="Continue")],
             metadata={"context_plan": {"trigger_tokens": 155_000}},
@@ -444,7 +444,7 @@ def test_anthropic_provider_enables_native_compaction_before_local_fallback(
     }
 
 
-def test_anthropic_provider_omits_native_compaction_for_unsupported_model(
+async def test_anthropic_provider_omits_native_compaction_for_unsupported_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -457,7 +457,7 @@ def test_anthropic_provider_omits_native_compaction_for_unsupported_model(
     )
 
     class FakeMessages:
-        def create(self, **params: object) -> object:
+        async def create(self, **params: object) -> object:
             captured.update(params)
             return anthropic_response
 
@@ -465,9 +465,9 @@ def test_anthropic_provider_omits_native_compaction_for_unsupported_model(
         def __init__(self, **params: object) -> None:
             self.beta = SimpleNamespace(messages=FakeMessages())
 
-    monkeypatch.setattr("providers.anthropic_provider.Anthropic", FakeAnthropic)
+    monkeypatch.setattr("providers.anthropic_provider.AsyncAnthropic", FakeAnthropic)
     provider = AnthropicProvider(api_key="test-key")
-    provider.generate(
+    await provider.generate(
         ProviderRequest(
             messages=[ProviderMessage(role="user", content="Continue")],
             model="claude-sonnet-4-5",
@@ -479,7 +479,7 @@ def test_anthropic_provider_omits_native_compaction_for_unsupported_model(
     assert captured["context_management"] is omit
 
 
-def test_anthropic_provider_extracts_and_replays_compaction_blocks(
+async def test_anthropic_provider_extracts_and_replays_compaction_blocks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     anthropic_response = SimpleNamespace(
@@ -498,15 +498,15 @@ def test_anthropic_provider_extracts_and_replays_compaction_blocks(
     )
 
     class FakeMessages:
-        def create(self, **params: object) -> object:
+        async def create(self, **params: object) -> object:
             return anthropic_response
 
     class FakeAnthropic:
         def __init__(self, **params: object) -> None:
             self.beta = SimpleNamespace(messages=FakeMessages())
 
-    monkeypatch.setattr("providers.anthropic_provider.Anthropic", FakeAnthropic)
-    response = AnthropicProvider(api_key="test-key").generate(
+    monkeypatch.setattr("providers.anthropic_provider.AsyncAnthropic", FakeAnthropic)
+    response = await AnthropicProvider(api_key="test-key").generate(
         ProviderRequest(
             messages=[ProviderMessage(role="user", content="Continue")],
             metadata={"context_plan": {"trigger_tokens": 170_000}},

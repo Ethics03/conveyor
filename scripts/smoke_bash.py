@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from dataclasses import asdict
 from pathlib import Path
@@ -44,10 +45,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
+async def main() -> None:
     args = parse_args()
     workspace = args.workspace.expanduser().resolve()
-    result = ToolRegistry([bash]).execute(
+    result = await ToolRegistry([bash]).execute(
         ToolCall(
             name="bash",
             arguments={
@@ -76,4 +77,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

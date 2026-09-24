@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import tempfile
@@ -35,7 +36,7 @@ def _token_count(usage: dict[str, object], name: str) -> int:
     return value
 
 
-def main() -> None:
+async def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Live-test Anthropic automatic prompt caching across two turns. "
@@ -80,14 +81,14 @@ def main() -> None:
             prompt_caching=True,
             native_compaction=False,
         )
-        with Runtime(
-            store=Store(database),
+        async with Runtime(
+            store=await Store.open(database),
             provider=provider,
             registry=ToolRegistry(),
             workspace=Path.cwd(),
         ) as runtime:
-            session = runtime.create_session("Anthropic prompt caching smoke")
-            runtime.store.save_message(
+            session = await runtime.create_session("Anthropic prompt caching smoke")
+            await runtime.store.save_message(
                 Message(
                     session_id=session.id,
                     role="user",
@@ -95,7 +96,7 @@ def main() -> None:
                     + "context " * args.history_words,
                 )
             )
-            runtime.store.save_message(
+            await runtime.store.save_message(
                 Message(
                     session_id=session.id,
                     role="assistant",
@@ -108,12 +109,12 @@ def main() -> None:
                 model=args.model,
             )
 
-            warm_outcome = runtime.run_turn(
+            warm_outcome = await runtime.run_turn(
                 agent=agent,
                 session=session,
                 content="Reply with exactly CACHE_WARM.",
             )
-            hit_outcome = runtime.run_turn(
+            hit_outcome = await runtime.run_turn(
                 agent=agent,
                 session=session,
                 content="Reply with exactly CACHE_HIT.",
@@ -166,4 +167,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

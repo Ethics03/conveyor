@@ -52,7 +52,9 @@ def test_derive_session_title_ignores_content_beyond_input_cap() -> None:
 
 
 def test_clean_session_title_normalizes_whitespace() -> None:
-    assert clean_session_title("  Fix\n  provider   timeout  ") == "Fix provider timeout"
+    assert (
+        clean_session_title("  Fix\n  provider   timeout  ") == "Fix provider timeout"
+    )
 
 
 @pytest.mark.parametrize("title", ["", " ", "\n\t"])
@@ -66,10 +68,10 @@ def test_clean_session_title_rejects_long_title() -> None:
         clean_session_title("x" * (MAX_SESSION_TITLE_CHARS + 1))
 
 
-def test_generate_session_title_uses_a_bounded_no_tools_request() -> None:
+async def test_generate_session_title_uses_a_bounded_no_tools_request() -> None:
     provider = FakeProvider(['"Interview Today"'])
 
-    title = generate_session_title(
+    title = await generate_session_title(
         provider,
         user_message="Do I have an interview today?",
         assistant_response="Yes, at 3 PM.",
@@ -86,11 +88,11 @@ def test_generate_session_title_uses_a_bounded_no_tools_request() -> None:
     assert [message.role for message in request.messages] == ["system", "user"]
 
 
-def test_generate_session_title_rejects_tool_calls() -> None:
+async def test_generate_session_title_rejects_tool_calls() -> None:
     provider = FakeProvider([ProviderResponse.tool("read_file", {"path": "README.md"})])
 
     with pytest.raises(ValueError, match="returned tool calls"):
-        generate_session_title(
+        await generate_session_title(
             provider,
             user_message="Read the project",
             assistant_response="I will inspect it.",

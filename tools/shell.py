@@ -1,17 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import codecs
 import os
-import subprocess
-import threading
-import time
+import signal
 from collections import deque
 from math import isfinite
 from pathlib import Path
 from shutil import which
-from typing import TextIO
 
 from tools.base import ExecutionContext, JsonObject, tool
-from tools.process import terminate_process
 from tools.workspace import (
     WorkspacePathError,
     WorkspaceToolError,
@@ -109,19 +107,87 @@ class _BoundedOutput:
         head_chars = available // 2
         tail_chars = available - head_chars
         return (
-            head[:head_chars]
-            + _OUTPUT_TRUNCATION_MARKER
-            + tail[-tail_chars:],
+            head[:head_chars] + _OUTPUT_TRUNCATION_MARKER + tail[-tail_chars:],
             True,
         )
 
 
-def _drain_output(stream: TextIO, output: _BoundedOutput) -> None:
+async def _drain_output(
+    stream: asyncio.StreamReader,
+    output: _BoundedOutput,
+) -> None:
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     try:
-        while chunk := stream.read(8192):
-            output.append(chunk)
-    except (OSError, ValueError):
+        while chunk := await stream.read(8192):
+            output.append(decoder.decode(chunk))
+        output.append(decoder.decode(b"", final=True))
+    except OSError, ValueError, asyncio.CancelledError:
+        return
+
+
+async def _terminate_process(
+    process: asyncio.subprocess.Process,
+    wait_task: asyncio.Task[int],
+) -> None:
+    if os.name != "posix":
+        if process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(asyncio.shield(wait_task), timeout=1)
+            except TimeoutError:
+                process.kill()
+        await wait_task
+        return
+
+    process_group = process.pid
+    try:
+        os.killpg(process_group, signal.SIGTERM)
+    except ProcessLookupError:
+        await wait_task
+        return
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 1
+    while loop.time() < deadline:
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            await wait_task
+            return
+        await asyncio.sleep(0.05)
+
+    try:
+        os.killpg(process_group, signal.SIGKILL)
+    except ProcessLookupError:
         pass
+
+    try:
+        await asyncio.wait_for(asyncio.shield(wait_task), timeout=1)
+    except TimeoutError:
+        process.kill()
+        await wait_task
+
+
+async def _wait_for_process(
+    process: asyncio.subprocess.Process,
+    wait_task: asyncio.Task[int],
+    *,
+    context: ExecutionContext,
+    timeout_seconds: float,
+) -> bool:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    while process.returncode is None:
+        context.cancellation.raise_if_cancelled()
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return True
+        _, _ = await asyncio.wait(
+            {wait_task},
+            timeout=min(COMMAND_POLL_INTERVAL_SECONDS, remaining),
+        )
+    context.cancellation.raise_if_cancelled()
+    return False
 
 
 def _relative_cwd(workspace: Path, cwd: Path) -> str:
@@ -136,7 +202,7 @@ def _relative_cwd(workspace: Path, cwd: Path) -> str:
         "inside the workspace."
     ),
 )
-def bash(
+async def bash(
     command: str,
     context: ExecutionContext,
     cwd: str = ".",
@@ -155,71 +221,53 @@ def bash(
         0.1,
         min(float(timeout_seconds), MAX_COMMAND_TIMEOUT_SECONDS),
     )
-    process = subprocess.Popen(
-        [require_bash(), "-c", command],
+    process = await asyncio.create_subprocess_exec(
+        require_bash(),
+        "-c",
+        command,
         cwd=resolved_cwd,
         env=_command_environment(),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
     )
     if process.stdout is None or process.stderr is None:
-        terminate_process(process)
+        process.kill()
+        _ = await process.wait()
         raise WorkspaceToolError("Command output pipes were not created")
 
     stdout_output = _BoundedOutput(MAX_COMMAND_OUTPUT_CHARS)
     stderr_output = _BoundedOutput(MAX_COMMAND_OUTPUT_CHARS)
-    stdout_thread = threading.Thread(
-        target=_drain_output,
-        args=(process.stdout, stdout_output),
-        daemon=True,
-    )
-    stderr_thread = threading.Thread(
-        target=_drain_output,
-        args=(process.stderr, stderr_output),
-        daemon=True,
-    )
-    stdout_thread.start()
-    stderr_thread.start()
-
-    timed_out = False
-    deadline = time.monotonic() + normalized_timeout
+    stdout_task = asyncio.create_task(_drain_output(process.stdout, stdout_output))
+    stderr_task = asyncio.create_task(_drain_output(process.stderr, stderr_output))
+    wait_task = asyncio.create_task(process.wait())
     try:
-        while process.poll() is None:
-            context.cancellation.raise_if_cancelled()
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                timed_out = True
-                break
-            try:
-                _ = process.wait(
-                    timeout=min(COMMAND_POLL_INTERVAL_SECONDS, remaining)
-                )
-            except subprocess.TimeoutExpired:
-                pass
-        context.cancellation.raise_if_cancelled()
+        timed_out = await _wait_for_process(
+            process,
+            wait_task,
+            context=context,
+            timeout_seconds=normalized_timeout,
+        )
     except BaseException:
-        terminate_process(process)
+        await _terminate_process(process, wait_task)
+        await asyncio.gather(stdout_task, stderr_task)
         raise
 
     # A foreground command must not leave background descendants running.
-    terminate_process(process)
-
-    stdout_thread.join(timeout=2)
-    stderr_thread.join(timeout=2)
-    process.stdout.close()
-    process.stderr.close()
-    stdout_thread.join(timeout=1)
-    stderr_thread.join(timeout=1)
+    await _terminate_process(process, wait_task)
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(stdout_task, stderr_task),
+            timeout=3,
+        )
+    except TimeoutError as exc:
+        stdout_task.cancel()
+        stderr_task.cancel()
+        raise WorkspaceToolError("Command output streams did not close") from exc
 
     if process.returncode is None:
         raise WorkspaceToolError("Command process did not terminate")
-    if stdout_thread.is_alive() or stderr_thread.is_alive():
-        raise WorkspaceToolError("Command output streams did not close")
 
     stdout, stdout_truncated = stdout_output.render()
     stderr, stderr_truncated = stderr_output.render()

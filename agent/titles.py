@@ -53,7 +53,7 @@ def derive_session_title(user_message: str) -> str | None:
     return prefix.rstrip(" ,.;:-") + suffix
 
 
-def generate_session_title(
+async def generate_session_title(
     provider: Provider,
     *,
     user_message: str,
@@ -68,7 +68,7 @@ def generate_session_title(
         },
         ensure_ascii=False,
     )
-    response = provider.generate(
+    response = await provider.generate(
         ProviderRequest(
             messages=[
                 ProviderMessage(role="system", content=TITLE_SYSTEM_PROMPT),

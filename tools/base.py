@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import NoneType, UnionType
@@ -15,7 +16,10 @@ from providers.base import ToolSchema
 JsonValue = str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
 JsonObject = dict[str, JsonValue]
 ToolOutput = JsonValue
-ToolExecutor = Callable[[JsonObject, "ExecutionContext"], ToolOutput]
+ToolExecutor = Callable[
+    [JsonObject, "ExecutionContext"],
+    Coroutine[object, object, ToolOutput],
+]
 
 
 @dataclass(slots=True)
@@ -93,8 +97,7 @@ def tool(
 ) -> Callable[[Callable[..., object]], Tool]:
     def decorator(fn: Callable[..., object]) -> Tool:
         fn_name = cast(str, getattr(fn, "__name__", type(fn).__name__))
-        if inspect.iscoroutinefunction(fn):
-            raise TypeError(f"Tool function must be synchronous: {fn_name}")
+        is_async = inspect.iscoroutinefunction(fn)
 
         signature = inspect.signature(fn)
         properties: JsonObject = {}
@@ -121,11 +124,20 @@ def tool(
             },
         )
 
-        def execute(arguments: JsonObject, context: ExecutionContext) -> ToolOutput:
+        async def execute(
+            arguments: JsonObject,
+            context: ExecutionContext,
+        ) -> ToolOutput:
             kwargs: dict[str, object] = dict(arguments)
             if wants_context:
                 kwargs["context"] = context
-            return cast(ToolOutput, fn(**cast(dict[str, Any], kwargs)))
+            typed_kwargs = cast(dict[str, Any], kwargs)
+            if is_async:
+                async_fn = cast(Callable[..., Awaitable[object]], fn)
+                output = await async_fn(**typed_kwargs)
+            else:
+                output = await asyncio.to_thread(fn, **typed_kwargs)
+            return cast(ToolOutput, output)
 
         return Tool(
             schema=schema,

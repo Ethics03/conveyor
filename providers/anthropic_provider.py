@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from anthropic import Anthropic, omit
+from anthropic import AsyncAnthropic, omit
 from anthropic.types.beta import (
     BetaCompact20260112EditParam,
     BetaCompactionBlockParam,
@@ -72,18 +72,18 @@ class AnthropicProvider:
     prompt_caching: bool = True
     native_compaction: bool = True
     compaction_trigger_tokens: int = DEFAULT_ANTHROPIC_COMPACTION_TRIGGER_TOKENS
-    _client: Anthropic = field(init=False, repr=False, compare=False)
+    _client: AsyncAnthropic = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.compaction_trigger_tokens < MIN_ANTHROPIC_COMPACTION_TRIGGER_TOKENS:
             minimum = MIN_ANTHROPIC_COMPACTION_TRIGGER_TOKENS
-            raise ValueError(
-                f"compaction_trigger_tokens must be at least {minimum}"
-            )
-        self._client = Anthropic(api_key=self.api_key) if self.api_key else Anthropic()
+            raise ValueError(f"compaction_trigger_tokens must be at least {minimum}")
+        self._client = (
+            AsyncAnthropic(api_key=self.api_key) if self.api_key else AsyncAnthropic()
+        )
 
-    def close(self) -> None:
-        self._client.close()
+    async def close(self) -> None:
+        await self._client.close()
 
     def model_limits(self, model: str | None = None) -> ModelLimits:
         return ModelLimits(
@@ -91,7 +91,7 @@ class AnthropicProvider:
             max_output_tokens=self.max_output_tokens,
         )
 
-    def generate(self, request: ProviderRequest) -> ProviderResponse:
+    async def generate(self, request: ProviderRequest) -> ProviderResponse:
         model_name = request.model or self.model
         system = _system_instructions(request.messages)
         tools = _anthropic_tools(request)
@@ -101,7 +101,7 @@ class AnthropicProvider:
             enabled=self.native_compaction,
             configured_trigger_tokens=self.compaction_trigger_tokens,
         )
-        response = self._client.beta.messages.create(
+        response = await self._client.beta.messages.create(
             model=model_name,
             max_tokens=request.max_tokens or self.max_output_tokens,
             messages=_anthropic_messages(request.messages),

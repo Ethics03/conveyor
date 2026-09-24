@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+import asyncio
+from collections.abc import AsyncIterator
+from pathlib import Path
 from threading import Barrier
 from threading import Event as ThreadEvent
 
@@ -34,10 +36,27 @@ from tools.registry import ToolRegistry
 from tools.workspace import write_file
 
 
-def _session_with_user_message(store: Store) -> Session:
+@pytest.fixture(autouse=True)
+async def close_test_stores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[None]:
+    stores: list[Store] = []
+    open_store = Store.open
+
+    async def tracked_open(path: str | Path = ":memory:") -> Store:
+        store = await open_store(path)
+        stores.append(store)
+        return store
+
+    monkeypatch.setattr(Store, "open", staticmethod(tracked_open))
+    yield
+    await asyncio.gather(*(store.close() for store in stores))
+
+
+async def _session_with_user_message(store: Store) -> Session:
     session = Session()
-    store.save_session(session)
-    store.save_message(
+    await store.save_session(session)
+    await store.save_message(
         Message(
             session_id=session.id,
             role="user",
@@ -84,10 +103,10 @@ def test_preflight_tool_calls_denies_unknown_tool(tmp_path) -> None:
     assert decisions[0].decision.reason == "Unknown tool: missing"
 
 
-def test_block_run_persists_pending_approvals_and_events() -> None:
-    store = Store(":memory:")
-    session = _session_with_user_message(store)
-    run = _start_run(agent=Agent(), session=session, store=store)
+async def test_block_run_persists_pending_approvals_and_events() -> None:
+    store = await Store.open(":memory:")
+    session = await _session_with_user_message(store)
+    run = await _start_run(agent=Agent(), session=session, store=store)
     read_call = ToolCall(id="call_read", name="read_file")
     denied_call = ToolCall(id="call_denied", name="run_command")
     write_call = ToolCall(id="call_write", name="write_file")
@@ -97,9 +116,9 @@ def test_block_run_persists_pending_approvals_and_events() -> None:
         role="assistant",
         tool_calls=[read_call, denied_call, write_call],
     )
-    store.save_message(assistant_message)
+    await store.save_message(assistant_message)
 
-    approvals = _block_run(
+    approvals = await _block_run(
         run=run,
         final_message=assistant_message,
         decisions=[
@@ -121,13 +140,13 @@ def test_block_run_persists_pending_approvals_and_events() -> None:
     assert len(approvals) == 1
     approval = approvals[0]
     assert approval.tool_call == write_call
-    assert store.get_approval(approval.id) == approval
-    assert [event.type for event in store.list_events(run_id=run.id)] == [
+    assert await store.get_approval(approval.id) == approval
+    assert [event.type for event in await store.list_events(run_id=run.id)] == [
         "run.started",
         "approval.requested",
         "run.blocked",
     ]
-    blocked_event = store.list_events(run_id=run.id)[-1]
+    blocked_event = (await store.list_events(run_id=run.id))[-1]
     assert blocked_event.payload == {
         "approval_ids": [approval.id],
         "approval_count": 1,
@@ -135,10 +154,10 @@ def test_block_run_persists_pending_approvals_and_events() -> None:
     }
 
 
-def test_block_run_requires_pending_approval() -> None:
-    store = Store(":memory:")
-    session = _session_with_user_message(store)
-    run = _start_run(agent=Agent(), session=session, store=store)
+async def test_block_run_requires_pending_approval() -> None:
+    store = await Store.open(":memory:")
+    session = await _session_with_user_message(store)
+    run = await _start_run(agent=Agent(), session=session, store=store)
     tool_call = ToolCall(name="read_file")
     assistant_message = Message(
         session_id=session.id,
@@ -148,7 +167,7 @@ def test_block_run_requires_pending_approval() -> None:
     )
 
     with pytest.raises(ValueError, match="without pending approvals"):
-        _block_run(
+        await _block_run(
             run=run,
             final_message=assistant_message,
             decisions=[ToolCallDecision(tool_call, PolicyDecision("allow"))],
@@ -159,12 +178,12 @@ def test_block_run_requires_pending_approval() -> None:
     assert run.status == "running"
 
 
-def test_run_agent_finishes_with_plain_response(tmp_path) -> None:
-    store = Store(":memory:")
-    session = _session_with_user_message(store)
+async def test_run_agent_finishes_with_plain_response(tmp_path) -> None:
+    store = await Store.open(":memory:")
+    session = await _session_with_user_message(store)
     provider = FakeProvider([ProviderResponse.message("Done.")])
 
-    outcome = run_agent(
+    outcome = await run_agent(
         agent=Agent(),
         session=session,
         provider=provider,
@@ -177,25 +196,25 @@ def test_run_agent_finishes_with_plain_response(tmp_path) -> None:
     assert outcome.iterations == 1
     assert outcome.final_message is not None
     assert outcome.final_message.content == "Done."
-    assert [message.role for message in store.list_messages(session.id)] == [
+    assert [message.role for message in await store.list_messages(session.id)] == [
         "user",
         "assistant",
     ]
-    assert [event.type for event in store.list_events(run_id=outcome.run.id)] == [
+    assert [event.type for event in await store.list_events(run_id=outcome.run.id)] == [
         "run.started",
         "message.created",
         "run.finished",
     ]
 
 
-def test_run_agent_persists_cancellation_before_provider_call(tmp_path) -> None:
-    store = Store(":memory:")
-    session = _session_with_user_message(store)
+async def test_run_agent_persists_cancellation_before_provider_call(tmp_path) -> None:
+    store = await Store.open(":memory:")
+    session = await _session_with_user_message(store)
     provider = FakeProvider([ProviderResponse.message("Should not be requested")])
     cancellation = CancellationToken()
     _ = cancellation.cancel("Stopped from the client")
 
-    outcome = run_agent(
+    outcome = await run_agent(
         agent=Agent(),
         session=session,
         provider=provider,
@@ -211,7 +230,7 @@ def test_run_agent_persists_cancellation_before_provider_call(tmp_path) -> None:
     assert outcome.run.error == "Stopped from the client"
     assert outcome.final_message is None
     assert provider.requests == []
-    assert [event.type for event in store.list_events(run_id=outcome.run.id)] == [
+    assert [event.type for event in await store.list_events(run_id=outcome.run.id)] == [
         "run.started",
         "run.cancelled",
     ]
@@ -227,18 +246,18 @@ def test_run_agent_persists_cancellation_before_provider_call(tmp_path) -> None:
         ("tool_use", "Provider returned tool_use without any tool calls"),
     ],
 )
-def test_run_agent_fails_on_incomplete_provider_response(
+async def test_run_agent_fails_on_incomplete_provider_response(
     tmp_path,
     finish_reason: FinishReason,
     expected_error: str,
 ) -> None:
-    store = Store(":memory:")
-    session = _session_with_user_message(store)
+    store = await Store.open(":memory:")
+    session = await _session_with_user_message(store)
     provider = FakeProvider(
         [ProviderResponse.message("Partial response", finish_reason=finish_reason)]
     )
 
-    outcome = run_agent(
+    outcome = await run_agent(
         agent=Agent(),
         session=session,
         provider=provider,
@@ -251,17 +270,19 @@ def test_run_agent_fails_on_incomplete_provider_response(
     assert outcome.run.error == expected_error
     assert outcome.final_message is not None
     assert outcome.final_message.content == "Partial response"
-    assert [event.type for event in store.list_events(run_id=outcome.run.id)] == [
+    assert [event.type for event in await store.list_events(run_id=outcome.run.id)] == [
         "run.started",
         "message.created",
         "run.failed",
     ]
 
 
-def test_run_agent_sends_compacted_context_and_records_telemetry(tmp_path) -> None:
-    store = Store(":memory:")
+async def test_run_agent_sends_compacted_context_and_records_telemetry(
+    tmp_path,
+) -> None:
+    store = await Store.open(":memory:")
     session = Session()
-    store.save_session(session)
+    await store.save_session(session)
     old_call = ToolCall(id="call_old", name="read_file")
     old_payload = "x" * (MIN_CLEARABLE_TOOL_RESULT_CHARS * 10)
     history = [
@@ -284,13 +305,13 @@ def test_run_agent_sends_compacted_context_and_records_telemetry(tmp_path) -> No
         Message(session_id=session.id, role="user", content="Recent turn two"),
     ]
     for message in history:
-        store.save_message(message)
+        await store.save_message(message)
 
     provider = FakeProvider(
         [ProviderResponse.message("Done with compacted context.")],
         model_limits=ModelLimits(12_000, 1_000),
     )
-    outcome = run_agent(
+    outcome = await run_agent(
         agent=Agent(),
         session=session,
         provider=provider,
@@ -310,8 +331,8 @@ def test_run_agent_sends_compacted_context_and_records_telemetry(tmp_path) -> No
     assert telemetry["summary_required"] is False
     assert telemetry["input_tokens_after"] < telemetry["input_tokens_before"]
     assert request.max_tokens == 1_000
-    assert store.list_messages(session.id)[2].content == old_payload
-    assert [event.type for event in store.list_events(run_id=outcome.run.id)] == [
+    assert (await store.list_messages(session.id))[2].content == old_payload
+    assert [event.type for event in await store.list_events(run_id=outcome.run.id)] == [
         "run.started",
         "context.compaction_planned",
         "message.created",
@@ -319,9 +340,9 @@ def test_run_agent_sends_compacted_context_and_records_telemetry(tmp_path) -> No
     ]
 
 
-def test_run_agent_persists_native_compaction_checkpoint(tmp_path) -> None:
-    store = Store(":memory:")
-    session = _session_with_user_message(store)
+async def test_run_agent_persists_native_compaction_checkpoint(tmp_path) -> None:
+    store = await Store.open(":memory:")
+    session = await _session_with_user_message(store)
     state = ProviderReplayState(
         provider="anthropic",
         items=(
@@ -342,7 +363,7 @@ def test_run_agent_persists_native_compaction_checkpoint(tmp_path) -> None:
         ]
     )
 
-    outcome = run_agent(
+    outcome = await run_agent(
         agent=Agent(),
         session=session,
         provider=provider,
@@ -355,9 +376,9 @@ def test_run_agent_persists_native_compaction_checkpoint(tmp_path) -> None:
     assert outcome.final_message.metadata["provider_replay_state"] == (
         state.to_metadata()
     )
-    reopened = store.list_messages(session.id)
+    reopened = await store.list_messages(session.id)
     assert reopened[-1].metadata["provider_replay_state"] == state.to_metadata()
-    events = store.list_events(run_id=outcome.run.id)
+    events = await store.list_events(run_id=outcome.run.id)
     assert [event.type for event in events] == [
         "run.started",
         "message.created",
@@ -370,38 +391,13 @@ def test_run_agent_persists_native_compaction_checkpoint(tmp_path) -> None:
     }
 
 
-def test_run_agent_can_use_main_thread_store_from_worker(tmp_path) -> None:
-    store = Store(":memory:")
-    session = _session_with_user_message(store)
-    provider = FakeProvider([ProviderResponse.message("Done from worker.")])
-
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        outcome = executor.submit(
-            run_agent,
-            agent=Agent(),
-            session=session,
-            provider=provider,
-            registry=ToolRegistry(),
-            context=ExecutionContext(workspace=tmp_path),
-            store=store,
-        ).result()
-
-    assert outcome.run.status == "finished"
-    assert store.get_run(outcome.run.id) == outcome.run
-    assert [event.type for event in store.list_events(run_id=outcome.run.id)] == [
-        "run.started",
-        "message.created",
-        "run.finished",
-    ]
-
-
-def test_run_agent_executes_tool_and_continues(tmp_path) -> None:
+async def test_run_agent_executes_tool_and_continues(tmp_path) -> None:
     @tool(permission="read")
     def echo(value: str) -> str:
         return value
 
-    store = Store(":memory:")
-    session = _session_with_user_message(store)
+    store = await Store.open(":memory:")
+    session = await _session_with_user_message(store)
     provider = FakeProvider(
         [
             ProviderResponse.tool(
@@ -413,7 +409,7 @@ def test_run_agent_executes_tool_and_continues(tmp_path) -> None:
         ]
     )
 
-    outcome = run_agent(
+    outcome = await run_agent(
         agent=Agent(tools=["echo"]),
         session=session,
         provider=provider,
@@ -424,7 +420,7 @@ def test_run_agent_executes_tool_and_continues(tmp_path) -> None:
 
     assert outcome.run.status == "finished"
     assert outcome.iterations == 2
-    messages = store.list_messages(session.id)
+    messages = await store.list_messages(session.id)
     assert [message.role for message in messages] == [
         "user",
         "assistant",
@@ -437,7 +433,7 @@ def test_run_agent_executes_tool_and_continues(tmp_path) -> None:
     assert provider.requests[1].messages[-1].tool_call_id == "call_echo"
 
 
-def test_run_agent_executes_parallel_safe_tools_concurrently_in_call_order(
+async def test_run_agent_executes_parallel_safe_tools_concurrently_in_call_order(
     tmp_path,
 ) -> None:
     first_started = ThreadEvent()
@@ -461,8 +457,8 @@ def test_run_agent_executes_parallel_safe_tools_concurrently_in_call_order(
         release_first.set()
         return "second"
 
-    store = Store(":memory:")
-    session = _session_with_user_message(store)
+    store = await Store.open(":memory:")
+    session = await _session_with_user_message(store)
     provider = FakeProvider(
         [
             ProviderResponse(
@@ -476,7 +472,7 @@ def test_run_agent_executes_parallel_safe_tools_concurrently_in_call_order(
         ]
     )
 
-    outcome = run_agent(
+    outcome = await run_agent(
         agent=Agent(tools=["first", "second"]),
         session=session,
         provider=provider,
@@ -487,7 +483,9 @@ def test_run_agent_executes_parallel_safe_tools_concurrently_in_call_order(
 
     assert outcome.run.status == "finished"
     tool_messages = [
-        message for message in store.list_messages(session.id) if message.role == "tool"
+        message
+        for message in await store.list_messages(session.id)
+        if message.role == "tool"
     ]
     assert [message.name for message in tool_messages] == ["first", "second"]
     assert [message.content for message in tool_messages] == ["first", "second"]
@@ -497,7 +495,7 @@ def test_run_agent_executes_parallel_safe_tools_concurrently_in_call_order(
     ]
 
 
-def test_run_agent_uses_non_parallel_tool_as_batch_barrier(tmp_path) -> None:
+async def test_run_agent_uses_non_parallel_tool_as_batch_barrier(tmp_path) -> None:
     before_barrier = Barrier(2)
     after_barrier = Barrier(2)
     before_finished: set[str] = set()
@@ -537,8 +535,8 @@ def test_run_agent_uses_non_parallel_tool_as_batch_barrier(tmp_path) -> None:
         return "after-two"
 
     tools = [before_one, before_two, ordered_step, after_one, after_two]
-    store = Store(":memory:")
-    session = _session_with_user_message(store)
+    store = await Store.open(":memory:")
+    session = await _session_with_user_message(store)
     provider = FakeProvider(
         [
             ProviderResponse(
@@ -555,7 +553,7 @@ def test_run_agent_uses_non_parallel_tool_as_batch_barrier(tmp_path) -> None:
         ]
     )
 
-    outcome = run_agent(
+    outcome = await run_agent(
         agent=Agent(tools=[item.name for item in tools]),
         session=session,
         provider=provider,
@@ -566,7 +564,9 @@ def test_run_agent_uses_non_parallel_tool_as_batch_barrier(tmp_path) -> None:
 
     assert outcome.run.status == "finished"
     tool_messages = [
-        message for message in store.list_messages(session.id) if message.role == "tool"
+        message
+        for message in await store.list_messages(session.id)
+        if message.role == "tool"
     ]
     assert [message.name for message in tool_messages] == [
         "before_one",
@@ -578,7 +578,7 @@ def test_run_agent_uses_non_parallel_tool_as_batch_barrier(tmp_path) -> None:
     assert all(message.metadata["ok"] is True for message in tool_messages)
 
 
-def test_run_agent_preserves_other_parallel_results_when_one_tool_fails(
+async def test_run_agent_preserves_other_parallel_results_when_one_tool_fails(
     tmp_path,
 ) -> None:
     both_started = Barrier(2)
@@ -593,8 +593,8 @@ def test_run_agent_preserves_other_parallel_results_when_one_tool_fails(
         _ = both_started.wait(timeout=1)
         return "available"
 
-    store = Store(":memory:")
-    session = _session_with_user_message(store)
+    store = await Store.open(":memory:")
+    session = await _session_with_user_message(store)
     provider = FakeProvider(
         [
             ProviderResponse(
@@ -608,7 +608,7 @@ def test_run_agent_preserves_other_parallel_results_when_one_tool_fails(
         ]
     )
 
-    outcome = run_agent(
+    outcome = await run_agent(
         agent=Agent(tools=["failing_read", "successful_read"]),
         session=session,
         provider=provider,
@@ -619,7 +619,9 @@ def test_run_agent_preserves_other_parallel_results_when_one_tool_fails(
 
     assert outcome.run.status == "finished"
     tool_messages = [
-        message for message in store.list_messages(session.id) if message.role == "tool"
+        message
+        for message in await store.list_messages(session.id)
+        if message.role == "tool"
     ]
     assert [message.metadata["ok"] for message in tool_messages] == [False, True]
     assert [message.content for message in tool_messages] == [
@@ -628,7 +630,7 @@ def test_run_agent_preserves_other_parallel_results_when_one_tool_fails(
     ]
 
 
-def test_run_agent_waits_for_approval_and_continues(tmp_path) -> None:
+async def test_run_agent_waits_for_approval_and_continues(tmp_path) -> None:
     executions: list[str] = []
 
     @tool(permission="read")
@@ -641,8 +643,8 @@ def test_run_agent_waits_for_approval_and_continues(tmp_path) -> None:
         executions.append("write")
         return "write"
 
-    store = Store(":memory:")
-    session = _session_with_user_message(store)
+    store = await Store.open(":memory:")
+    session = await _session_with_user_message(store)
     provider = FakeProvider(
         [
             ProviderResponse(
@@ -656,16 +658,19 @@ def test_run_agent_waits_for_approval_and_continues(tmp_path) -> None:
         ]
     )
     requested: list[ApprovalRequest] = []
+    loop = asyncio.get_running_loop()
 
     def approve(approval: ApprovalRequest) -> ApprovalDecision:
         requested.append(approval)
         assert executions == []
-        persisted_run = store.get_run(approval.run_id)
+        persisted_run = asyncio.run_coroutine_threadsafe(
+            store.get_run(approval.run_id), loop
+        ).result()
         assert persisted_run is not None
         assert persisted_run.status == "blocked"
         return "approved"
 
-    outcome = run_agent(
+    outcome = await run_agent(
         agent=Agent(tools=["inspect_workspace", "update_workspace"]),
         session=session,
         provider=provider,
@@ -679,18 +684,18 @@ def test_run_agent_waits_for_approval_and_continues(tmp_path) -> None:
     assert executions == ["read", "write"]
     assert len(requested) == 1
     assert requested[0].tool_call.id == "call_write"
-    persisted_approval = store.get_approval(requested[0].id)
+    persisted_approval = await store.get_approval(requested[0].id)
     assert persisted_approval is not None
     assert persisted_approval.status == "approved"
     assert len(provider.requests) == 2
-    assert [message.role for message in store.list_messages(session.id)] == [
+    assert [message.role for message in await store.list_messages(session.id)] == [
         "user",
         "assistant",
         "tool",
         "tool",
         "assistant",
     ]
-    assert [event.type for event in store.list_events(run_id=outcome.run.id)] == [
+    assert [event.type for event in await store.list_events(run_id=outcome.run.id)] == [
         "run.started",
         "message.created",
         "approval.requested",
@@ -708,9 +713,9 @@ def test_run_agent_waits_for_approval_and_continues(tmp_path) -> None:
     ]
 
 
-def test_run_agent_approves_workspace_write_before_mutation(tmp_path) -> None:
-    store = Store(":memory:")
-    session = _session_with_user_message(store)
+async def test_run_agent_approves_workspace_write_before_mutation(tmp_path) -> None:
+    store = await Store.open(":memory:")
+    session = await _session_with_user_message(store)
     provider = FakeProvider(
         [
             ProviderResponse.tool(
@@ -726,7 +731,7 @@ def test_run_agent_approves_workspace_write_before_mutation(tmp_path) -> None:
         assert (tmp_path / "result.txt").exists() is False
         return "approved"
 
-    outcome = run_agent(
+    outcome = await run_agent(
         agent=Agent(tools=["write_file"]),
         session=session,
         provider=provider,
@@ -740,7 +745,7 @@ def test_run_agent_approves_workspace_write_before_mutation(tmp_path) -> None:
     assert (tmp_path / "result.txt").read_text(encoding="utf-8") == "approved\n"
 
 
-def test_run_agent_returns_user_denial_to_provider(tmp_path) -> None:
+async def test_run_agent_returns_user_denial_to_provider(tmp_path) -> None:
     executions: list[str] = []
 
     @tool(permission="write")
@@ -748,8 +753,8 @@ def test_run_agent_returns_user_denial_to_provider(tmp_path) -> None:
         executions.append("write")
         return "write"
 
-    store = Store(":memory:")
-    session = _session_with_user_message(store)
+    store = await Store.open(":memory:")
+    session = await _session_with_user_message(store)
     provider = FakeProvider(
         [
             ProviderResponse.tool(
@@ -761,7 +766,7 @@ def test_run_agent_returns_user_denial_to_provider(tmp_path) -> None:
         ]
     )
 
-    outcome = run_agent(
+    outcome = await run_agent(
         agent=Agent(tools=["update_workspace"]),
         session=session,
         provider=provider,
@@ -773,17 +778,19 @@ def test_run_agent_returns_user_denial_to_provider(tmp_path) -> None:
 
     assert outcome.run.status == "finished"
     assert executions == []
-    tool_message = store.list_messages(session.id)[2]
+    tool_message = (await store.list_messages(session.id))[2]
     assert tool_message.content == "Tool call denied by user"
     assert tool_message.metadata["approval_status"] == "denied"
     assert provider.requests[1].messages[-1].tool_call_id == "call_write"
-    event_types = [event.type for event in store.list_events(run_id=outcome.run.id)]
+    event_types = [
+        event.type for event in await store.list_events(run_id=outcome.run.id)
+    ]
     assert "run.blocked" in event_types
     assert "run.resumed" in event_types
     assert "tool.started" not in event_types
 
 
-def test_run_agent_cleans_up_approvals_when_callback_fails(tmp_path) -> None:
+async def test_run_agent_cleans_up_approvals_when_callback_fails(tmp_path) -> None:
     executions: list[str] = []
 
     @tool(permission="write")
@@ -796,8 +803,8 @@ def test_run_agent_cleans_up_approvals_when_callback_fails(tmp_path) -> None:
         executions.append("second")
         return "second"
 
-    store = Store(":memory:")
-    session = _session_with_user_message(store)
+    store = await Store.open(":memory:")
+    session = await _session_with_user_message(store)
     provider = FakeProvider(
         [
             ProviderResponse(
@@ -819,7 +826,7 @@ def test_run_agent_cleans_up_approvals_when_callback_fails(tmp_path) -> None:
         raise RuntimeError("approval client disconnected")
 
     with pytest.raises(RuntimeError, match="approval client disconnected"):
-        _ = run_agent(
+        _ = await run_agent(
             agent=Agent(tools=["update_first", "update_second"]),
             session=session,
             provider=provider,
@@ -830,14 +837,16 @@ def test_run_agent_cleans_up_approvals_when_callback_fails(tmp_path) -> None:
         )
 
     assert executions == []
-    run = store.list_runs(session.id)[0]
+    run = (await store.list_runs(session.id))[0]
     assert run.status == "failed"
     assert run.error == "approval client disconnected"
-    assert [approval.status for approval in store.list_approvals(run_id=run.id)] == [
+    assert [
+        approval.status for approval in await store.list_approvals(run_id=run.id)
+    ] == [
         "approved",
         "denied",
     ]
-    assert [event.type for event in store.list_events(run_id=run.id)] == [
+    assert [event.type for event in await store.list_events(run_id=run.id)] == [
         "run.started",
         "message.created",
         "approval.requested",
@@ -849,7 +858,7 @@ def test_run_agent_cleans_up_approvals_when_callback_fails(tmp_path) -> None:
     ]
 
 
-def test_run_agent_denies_approval_without_callback(tmp_path) -> None:
+async def test_run_agent_denies_approval_without_callback(tmp_path) -> None:
     executions: list[str] = []
 
     @tool(permission="write")
@@ -857,8 +866,8 @@ def test_run_agent_denies_approval_without_callback(tmp_path) -> None:
         executions.append("write")
         return "write"
 
-    store = Store(":memory:")
-    session = _session_with_user_message(store)
+    store = await Store.open(":memory:")
+    session = await _session_with_user_message(store)
     provider = FakeProvider(
         [
             ProviderResponse.tool("update_workspace", {}),
@@ -866,7 +875,7 @@ def test_run_agent_denies_approval_without_callback(tmp_path) -> None:
         ]
     )
 
-    outcome = run_agent(
+    outcome = await run_agent(
         agent=Agent(tools=["update_workspace"]),
         session=session,
         provider=provider,
@@ -877,16 +886,16 @@ def test_run_agent_denies_approval_without_callback(tmp_path) -> None:
 
     assert outcome.run.status == "finished"
     assert executions == []
-    assert store.list_approvals(run_id=outcome.run.id)[0].status == "denied"
-    tool_message = store.list_messages(session.id)[2]
+    assert (await store.list_approvals(run_id=outcome.run.id))[0].status == "denied"
+    tool_message = (await store.list_messages(session.id))[2]
     assert tool_message.content == (
         "Tool call denied because no approval callback is configured"
     )
 
 
-def test_run_agent_returns_policy_denial_to_provider(tmp_path) -> None:
-    store = Store(":memory:")
-    session = _session_with_user_message(store)
+async def test_run_agent_returns_policy_denial_to_provider(tmp_path) -> None:
+    store = await Store.open(":memory:")
+    session = await _session_with_user_message(store)
     provider = FakeProvider(
         [
             ProviderResponse.tool("missing", {}, tool_call_id="call_missing"),
@@ -894,7 +903,7 @@ def test_run_agent_returns_policy_denial_to_provider(tmp_path) -> None:
         ]
     )
 
-    outcome = run_agent(
+    outcome = await run_agent(
         agent=Agent(),
         session=session,
         provider=provider,
@@ -904,7 +913,7 @@ def test_run_agent_returns_policy_denial_to_provider(tmp_path) -> None:
     )
 
     assert outcome.run.status == "finished"
-    messages = store.list_messages(session.id)
+    messages = await store.list_messages(session.id)
     assert messages[2].role == "tool"
     assert messages[2].content == "Unknown tool: missing"
     assert messages[2].metadata == {
@@ -914,20 +923,20 @@ def test_run_agent_returns_policy_denial_to_provider(tmp_path) -> None:
     assert provider.requests[1].messages[-1].tool_call_id == "call_missing"
 
 
-def test_run_agent_fails_at_iteration_limit(tmp_path) -> None:
+async def test_run_agent_fails_at_iteration_limit(tmp_path) -> None:
     @tool(permission="read")
     def echo(value: str) -> str:
         return value
 
-    store = Store(":memory:")
-    session = _session_with_user_message(store)
+    store = await Store.open(":memory:")
+    session = await _session_with_user_message(store)
     provider = FakeProvider(
         [
             ProviderResponse.tool("echo", {"value": "again"}),
         ]
     )
 
-    outcome = run_agent(
+    outcome = await run_agent(
         agent=Agent(tools=["echo"]),
         session=session,
         provider=provider,
@@ -940,27 +949,27 @@ def test_run_agent_fails_at_iteration_limit(tmp_path) -> None:
     assert outcome.run.status == "failed"
     assert outcome.run.error == "Maximum iterations exceeded: 1"
     assert outcome.iterations == 1
-    assert store.list_events(run_id=outcome.run.id)[-1].type == "run.failed"
+    assert (await store.list_events(run_id=outcome.run.id))[-1].type == "run.failed"
 
 
-def test_run_agent_persists_provider_failure(tmp_path) -> None:
+async def test_run_agent_persists_provider_failure(tmp_path) -> None:
     class FailingProvider:
         name = "failing"
 
         def model_limits(self, model: str | None = None) -> ModelLimits:
             return ModelLimits(200_000, 4_096)
 
-        def generate(self, request: ProviderRequest) -> ProviderResponse:
+        async def generate(self, request: ProviderRequest) -> ProviderResponse:
             raise RuntimeError("provider unavailable")
 
-        def close(self) -> None:
+        async def close(self) -> None:
             pass
 
-    store = Store(":memory:")
-    session = _session_with_user_message(store)
+    store = await Store.open(":memory:")
+    session = await _session_with_user_message(store)
 
     with pytest.raises(RuntimeError, match="provider unavailable"):
-        run_agent(
+        await run_agent(
             agent=Agent(),
             session=session,
             provider=FailingProvider(),
@@ -969,7 +978,7 @@ def test_run_agent_persists_provider_failure(tmp_path) -> None:
             store=store,
         )
 
-    run = store.list_runs(session.id)[0]
+    run = (await store.list_runs(session.id))[0]
     assert run.status == "failed"
     assert run.error == "provider unavailable"
-    assert store.list_events(run_id=run.id)[-1].type == "run.failed"
+    assert (await store.list_events(run_id=run.id))[-1].type == "run.failed"

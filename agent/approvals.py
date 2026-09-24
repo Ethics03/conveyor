@@ -6,7 +6,6 @@ from typing import Literal, Protocol
 from agent.models import ApprovalDecision, ApprovalRequest, ToolCall
 from tools.base import ExecutionContext, Tool
 
-
 PolicyAction = Literal["allow", "ask", "deny"]
 
 
