@@ -159,6 +159,12 @@ Follow the [Rust Style Guide](https://doc.rust-lang.org/style-guide/) and
   for types and traits; and `SCREAMING_SNAKE_CASE` for constants/statics.
 - Use named module roots such as `providers.rs` with children in `providers/`.
   Both that form and `mod.rs` are valid; use the selected layout consistently.
+- Keep imports at module scope, grouped as standard library, external crates,
+  then local imports. Name imported items explicitly instead of using globs.
+  Import types directly and alias colliding names, such as `SqlxError`. Short
+  module-qualified function calls such as `sqlx::query` and qualified macros or
+  derive attributes are useful conventions; avoid repetitive long type paths
+  inside implementations. These import choices are project style conventions.
 - Keep visibility narrow and public re-exports deliberate. Plain data records
   can expose fields; resource owners keep their internals private.
 - Use enums for statuses, permissions, finish reasons, and decisions. Preserve

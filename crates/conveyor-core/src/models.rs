@@ -2,13 +2,13 @@
 
 use chrono::{DateTime, FixedOffset, SubsecRound, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Map;
+use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use crate::{Error, Result};
 
 /// An open-ended JSON object, used for tool arguments and durable metadata.
-pub type JsonObject = Map<String, serde_json::Value>;
+pub type JsonObject = Map<String, Value>;
 /// An offset-aware timestamp, preserving the original stored timezone offset.
 /// Storage accepts microsecond precision; constructors generate that precision.
 pub type Timestamp = DateTime<FixedOffset>;
@@ -311,7 +311,7 @@ pub fn clean_title(title: &str) -> Result<String> {
     let mut length = 0;
     let mut pending_space = false;
     for character in title.chars() {
-        // Treat the four ASCII separators as Unicode whitespace too.
+        // Treat the four ASCII separators as whitespace alongside Unicode whitespace.
         if character.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&character) {
             pending_space = !normalized.is_empty();
             continue;

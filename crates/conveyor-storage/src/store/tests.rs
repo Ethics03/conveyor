@@ -1,9 +1,18 @@
-use std::{sync::Arc, time::Duration};
+use std::{future::ready, sync::Arc, time::Duration};
 
-use sqlx::{Execute, QueryBuilder, Row, Sqlite, query::Query, sqlite::SqliteArguments};
-use tokio::sync::oneshot;
+use conveyor_core::models::{ApprovalStatus, Event, EventType};
+use sqlx::{
+    Connection, Execute, QueryBuilder, Row, Sqlite, SqliteConnection, query::Query,
+    sqlite::SqliteArguments,
+};
+use tokio::{
+    sync::oneshot,
+    task::{JoinSet, yield_now},
+    time::timeout,
+};
 
-use super::*;
+use super::{QUEUE_CAPACITY, SCHEMA, Store, insert_event};
+use crate::{Error, queries};
 
 #[tokio::test]
 async fn scoped_list_queries_search_existing_indexes() {
@@ -63,7 +72,7 @@ async fn assert_index_search(
 
 #[tokio::test]
 async fn cancelling_a_backpressured_write_submits_nothing_and_close_drains_the_queue() {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    timeout(Duration::from_secs(5), async {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("backpressure.sqlite");
         let store = Arc::new(Store::open(&path).await.unwrap());
@@ -82,14 +91,14 @@ async fn cancelling_a_backpressured_write_submits_nothing_and_close_drains_the_q
                 .await
         });
         started_rx.await.unwrap();
-        let mut writers = tokio::task::JoinSet::new();
+        let mut writers = JoinSet::new();
         for _ in 0..QUEUE_CAPACITY {
             let store = Arc::clone(&store);
             writers
                 .spawn(async move { store.append_event(&Event::new(EventType::RunStarted)).await });
         }
         while store.sender.lock().unwrap().as_ref().unwrap().capacity() != 0 {
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
         let cancelled = Event::new(EventType::RunCancelled);
         {
@@ -100,13 +109,13 @@ async fn cancelling_a_backpressured_write_submits_nothing_and_close_drains_the_q
             tokio::select! {
                 biased;
                 result = &mut pending => panic!("full queue admitted a write: {result:?}"),
-                () = std::future::ready(()) => {}
+                () = ready(()) => {}
             }
         }
         let closing_store = Arc::clone(&store);
         let closing = tokio::spawn(async move { closing_store.close().await });
         while store.sender.lock().unwrap().is_some() {
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
         assert!(!closing.is_finished());
         assert!(matches!(
@@ -135,7 +144,7 @@ async fn cancelling_a_backpressured_write_submits_nothing_and_close_drains_the_q
 
 #[tokio::test]
 async fn accepted_transactions_finish_after_the_caller_is_cancelled() {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    timeout(Duration::from_secs(5), async {
         for fail in [false, true] {
             let store = Arc::new(Store::open(":memory:").await.unwrap());
             let event = Event::new(EventType::RunCancelled);
@@ -179,7 +188,7 @@ async fn accepted_transactions_finish_after_the_caller_is_cancelled() {
 
 #[tokio::test]
 async fn cancelling_close_keeps_the_worker_available_for_a_later_drain() {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    timeout(Duration::from_secs(5), async {
         let store = Arc::new(Store::open(":memory:").await.unwrap());
         let event = Event::new(EventType::RunCancelled);
         let (started_tx, started_rx) = oneshot::channel();
@@ -201,7 +210,7 @@ async fn cancelling_close_keeps_the_worker_available_for_a_later_drain() {
         let close_store = Arc::clone(&store);
         let closing = tokio::spawn(async move { close_store.close().await });
         while store.sender.lock().unwrap().is_some() {
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
         assert!(!closing.is_finished());
         assert!(matches!(

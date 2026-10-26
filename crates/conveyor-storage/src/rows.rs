@@ -1,10 +1,10 @@
 //! Conversions between SQLite rows and domain records, including JSON and timestamps.
 
 use chrono::SecondsFormat;
+use conveyor_core::models::{ApprovalRequest, Event, Message, Run, Session, Timestamp};
 use serde::de::{DeserializeOwned, value::StrDeserializer};
+use serde_json::Error as JsonError;
 use sqlx::{Row, sqlite::SqliteRow};
-
-use conveyor_core::models::*;
 
 use crate::{Error, Result};
 
@@ -25,7 +25,7 @@ fn date(row: &SqliteRow, name: &str) -> Result<Timestamp> {
 }
 
 fn enumeration<T: DeserializeOwned>(row: &SqliteRow, name: &str) -> Result<T> {
-    Ok(T::deserialize(StrDeserializer::<serde_json::Error>::new(
+    Ok(T::deserialize(StrDeserializer::<JsonError>::new(
         row.try_get(name)?,
     ))?)
 }

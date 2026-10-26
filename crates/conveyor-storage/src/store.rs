@@ -2,16 +2,17 @@
 
 use std::{future::Future, path::Path, pin::Pin, sync::Mutex, time::Duration};
 
+use conveyor_core::models::{
+    self, ApprovalDecision, ApprovalRequest, ApprovalStatus, Event, EventType, Message, Run,
+    RunStatus, Session, SessionStatus, SessionTitleSource,
+};
 use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
 use tokio::{
     sync::{Mutex as AsyncMutex, mpsc, oneshot},
     task::JoinHandle,
 };
 
-use super::{queries, rows};
-use conveyor_core::models::{self, *};
-
-use crate::{Error, Result};
+use crate::{Error, Result, queries, rows};
 
 type QueryFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 type Command = Box<
@@ -33,6 +34,7 @@ mod tests;
 /// cancelled before enqueueing does not run. Call [`Self::close`] to stop new
 /// requests, drain accepted work, and observe worker/connection shutdown errors.
 /// Dropping the store also closes its queue, but cannot await the worker.
+#[derive(Debug)]
 pub struct Store {
     sender: Mutex<Option<mpsc::Sender<Command>>>,
     worker: AsyncMutex<Option<JoinHandle<Result<()>>>>,

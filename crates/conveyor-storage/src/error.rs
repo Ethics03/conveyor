@@ -1,6 +1,10 @@
 //! Typed persistence errors and conversions that preserve their sources.
 
-use conveyor_core::models::ApprovalStatus;
+use chrono::ParseError;
+use conveyor_core::{Error as DomainError, models::ApprovalStatus};
+use serde_json::Error as JsonError;
+use sqlx::Error as SqlxError;
+use tokio::task::JoinError;
 
 /// A recoverable failure from Conveyor's storage API.
 #[derive(Debug, thiserror::Error)]
@@ -11,13 +15,13 @@ pub enum Error {
     #[error("SQLite worker stopped before returning the operation result")]
     WorkerStopped,
     #[error("SQLite worker failed")]
-    WorkerFailed(#[from] tokio::task::JoinError),
+    WorkerFailed(#[from] JoinError),
     #[error("SQLite operation failed")]
-    Database(#[from] sqlx::Error),
+    Database(#[from] SqlxError),
     #[error("Invalid JSON or serialized enum value")]
-    Json(#[from] serde_json::Error),
+    Json(#[from] JsonError),
     #[error("Invalid stored timestamp")]
-    Timestamp(#[from] chrono::ParseError),
+    Timestamp(#[from] ParseError),
     #[error("Timestamp precision exceeds the storage format's microsecond precision")]
     TimestampPrecision,
     #[error("Database has unsupported schema version {found:?}; expected 1")]
@@ -25,7 +29,7 @@ pub enum Error {
     #[error("Existing database has no Conveyor schema version")]
     UnversionedDatabase,
     #[error(transparent)]
-    Domain(#[from] conveyor_core::Error),
+    Domain(#[from] DomainError),
     #[error("New approvals must be pending and have no resolution timestamp")]
     InvalidNewApproval,
     #[error("Unknown approval: {0}")]
