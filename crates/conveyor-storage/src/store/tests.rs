@@ -1,8 +1,65 @@
 use std::{sync::Arc, time::Duration};
 
+use sqlx::{Execute, QueryBuilder, Row, Sqlite, query::Query, sqlite::SqliteArguments};
 use tokio::sync::oneshot;
 
 use super::*;
+
+#[tokio::test]
+async fn scoped_list_queries_search_existing_indexes() {
+    let mut connection = SqliteConnection::connect("sqlite::memory:").await.unwrap();
+    sqlx::raw_sql(SCHEMA)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    for query in [
+        queries::events(Some("session"), None),
+        queries::events(None, Some("run")),
+        queries::events(Some("session"), Some("run")),
+    ] {
+        assert_index_search(
+            &mut connection,
+            query,
+            "SEARCH events USING INDEX idx_events_",
+        )
+        .await;
+    }
+    for status in [None, Some(ApprovalStatus::Pending)] {
+        assert_index_search(
+            &mut connection,
+            queries::approvals(Some("run"), status),
+            "SEARCH approvals USING INDEX idx_approvals_run",
+        )
+        .await;
+    }
+    connection.close().await.unwrap();
+}
+
+async fn assert_index_search(
+    connection: &mut SqliteConnection,
+    mut query: Query<'_, Sqlite, SqliteArguments>,
+    expected: &str,
+) {
+    let arguments = query.take_arguments().unwrap().unwrap();
+    // Explain the production query with its real bound arguments. The SQL comes
+    // only from our static list statements, never from caller-provided text.
+    let mut explain = QueryBuilder::<Sqlite>::with_arguments(
+        format!("EXPLAIN QUERY PLAN {}", query.sql().as_str()),
+        arguments,
+    );
+    let plan: Vec<String> = explain
+        .build()
+        .fetch_all(connection)
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get("detail"))
+        .collect();
+    assert!(
+        plan.iter().any(|detail| detail.starts_with(expected)),
+        "{plan:?}"
+    );
+}
 
 #[tokio::test]
 async fn accepted_transactions_finish_after_the_caller_is_cancelled() {

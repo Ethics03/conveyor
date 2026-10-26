@@ -8,7 +8,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use super::rows;
+use super::{queries, rows};
 use conveyor_core::models::{self, *};
 
 use crate::{Error, Result};
@@ -181,12 +181,17 @@ impl Store {
     }
 
     pub async fn list_sessions(&self, status: Option<SessionStatus>) -> Result<Vec<Session>> {
-        self.call(move |connection| Box::pin(async move {
-            let status = status.map(SessionStatus::as_str);
-            sqlx::query("SELECT * FROM sessions WHERE (? IS NULL OR status = ?) ORDER BY created_at, id")
-                .bind(status).bind(status).fetch_all(connection).await?
-                .iter().map(rows::session).collect()
-        })).await
+        self.call(move |connection| {
+            Box::pin(async move {
+                queries::sessions(status)
+                    .fetch_all(connection)
+                    .await?
+                    .iter()
+                    .map(rows::session)
+                    .collect()
+            })
+        })
+        .await
     }
 
     /// Save a validated user title, which subsequent automatic titles cannot replace.
@@ -332,19 +337,12 @@ impl Store {
         let (session_id, run_id) = (session_id.map(str::to_owned), run_id.map(str::to_owned));
         self.call(move |connection| {
             Box::pin(async move {
-                sqlx::query(
-                    "SELECT * FROM events WHERE (? IS NULL OR session_id = ?)
-                AND (? IS NULL OR run_id = ?) ORDER BY created_at, id",
-                )
-                .bind(&session_id)
-                .bind(&session_id)
-                .bind(&run_id)
-                .bind(&run_id)
-                .fetch_all(connection)
-                .await?
-                .iter()
-                .map(rows::event)
-                .collect()
+                queries::events(session_id.as_deref(), run_id.as_deref())
+                    .fetch_all(connection)
+                    .await?
+                    .iter()
+                    .map(rows::event)
+                    .collect()
             })
         })
         .await
@@ -423,20 +421,12 @@ impl Store {
         let run_id = run_id.map(str::to_owned);
         self.call(move |connection| {
             Box::pin(async move {
-                let status = status.map(ApprovalStatus::as_str);
-                sqlx::query(
-                    "SELECT * FROM approvals WHERE (? IS NULL OR run_id = ?)
-                AND (? IS NULL OR status = ?) ORDER BY created_at, id",
-                )
-                .bind(&run_id)
-                .bind(&run_id)
-                .bind(status)
-                .bind(status)
-                .fetch_all(connection)
-                .await?
-                .iter()
-                .map(rows::approval)
-                .collect()
+                queries::approvals(run_id.as_deref(), status)
+                    .fetch_all(connection)
+                    .await?
+                    .iter()
+                    .map(rows::approval)
+                    .collect()
             })
         })
         .await

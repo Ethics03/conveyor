@@ -414,6 +414,53 @@ async fn approval_filters_combine_and_tied_dates_use_ids() {
 }
 
 #[tokio::test]
+async fn event_filters_combine_without_losing_unscoped_events_or_stable_ordering() {
+    let (store, first_session, first_run) = seeded().await;
+    let second_session = Session::default();
+    store.save_session(&second_session).await.unwrap();
+    let second_run = Run::new(&second_session.id, "agent_other");
+    store.save_run(&second_run).await.unwrap();
+    let timestamp = now();
+    let events: Vec<_> = [
+        ("evt_a", None, None),
+        ("evt_b", Some(&first_session.id), None),
+        ("evt_c", Some(&first_session.id), Some(&first_run.id)),
+        ("evt_d", Some(&second_session.id), None),
+        ("evt_e", Some(&second_session.id), Some(&second_run.id)),
+    ]
+    .into_iter()
+    .map(|(id, session, run)| Event {
+        id: id.into(),
+        session_id: session.cloned(),
+        run_id: run.cloned(),
+        created_at: timestamp,
+        ..Event::new(EventType::RunStarted)
+    })
+    .collect();
+    for event in events.iter().rev() {
+        store.append_event(event).await.unwrap();
+    }
+    for session in [None, Some(first_session.id.as_str()), Some("' OR 1=1 --")] {
+        for run in [
+            None,
+            Some(first_run.id.as_str()),
+            Some(second_run.id.as_str()),
+        ] {
+            let expected: Vec<_> = events
+                .iter()
+                .filter(|event| {
+                    session.is_none_or(|id| event.session_id.as_deref() == Some(id))
+                        && run.is_none_or(|id| event.run_id.as_deref() == Some(id))
+                })
+                .cloned()
+                .collect();
+            assert_eq!(store.list_events(session, run).await.unwrap(), expected);
+        }
+    }
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn file_state_survives_reopen_and_close_is_idempotent() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("store.sqlite");

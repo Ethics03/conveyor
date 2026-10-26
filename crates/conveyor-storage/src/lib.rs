@@ -21,6 +21,7 @@
 //! ```
 
 mod error;
+mod queries;
 mod rows;
 mod store;
 
