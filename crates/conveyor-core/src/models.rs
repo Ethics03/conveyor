@@ -307,17 +307,27 @@ pub fn now() -> Timestamp {
 
 /// Normalize a session title and reject empty or over-100-character titles.
 pub fn clean_title(title: &str) -> Result<String> {
-    // Treat the four ASCII separators as whitespace alongside Unicode whitespace.
-    let title = title
-        .split(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    if title.is_empty() {
+    let mut normalized = String::new();
+    let mut length = 0;
+    let mut pending_space = false;
+    for character in title.chars() {
+        // Treat the four ASCII separators as Unicode whitespace too.
+        if character.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&character) {
+            pending_space = !normalized.is_empty();
+            continue;
+        }
+        length += 1 + usize::from(pending_space);
+        if length > 100 {
+            return Err(Error::TitleTooLong);
+        }
+        if pending_space {
+            normalized.push(' ');
+            pending_space = false;
+        }
+        normalized.push(character);
+    }
+    if normalized.is_empty() {
         return Err(Error::EmptyTitle);
     }
-    if title.chars().count() > 100 {
-        return Err(Error::TitleTooLong);
-    }
-    Ok(title)
+    Ok(normalized)
 }

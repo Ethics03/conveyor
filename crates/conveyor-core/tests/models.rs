@@ -73,3 +73,22 @@ fn title_validation_counts_unicode_characters_and_normalizes_whitespace() {
         Err(Error::EmptyTitle)
     ));
 }
+
+#[test]
+fn title_limits_apply_after_whitespace_normalization() {
+    let prefix = "🦀".repeat(98);
+    let title = format!("\u{1c}\u{1d} {prefix}\u{1e}\u{1f}\t x \n");
+    assert_eq!(clean_title(&title).unwrap(), format!("{prefix} x"));
+    assert!(matches!(
+        clean_title(&format!("{title}y")),
+        Err(Error::TitleTooLong)
+    ));
+    assert!(matches!(
+        clean_title("\u{1c}\u{1d}\u{1e}\u{1f}"),
+        Err(Error::EmptyTitle)
+    ));
+    assert!(matches!(
+        clean_title(&"long title ".repeat(100_000)),
+        Err(Error::TitleTooLong)
+    ));
+}
