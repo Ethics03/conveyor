@@ -1,4 +1,4 @@
-use conveyor::{Error, models::*};
+use conveyor_core::{Error, models::*};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use uuid::{Uuid, Version};
@@ -10,8 +10,10 @@ fn wire_values<T: DeserializeOwned + Serialize>(fixture: &Value, name: &str) {
 
 #[test]
 fn wire_enums_match_the_storage_format_contracts() {
-    let fixture: Value =
-        serde_json::from_str(include_str!("fixtures/storage-v1/records.json")).unwrap();
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../test-support/fixtures/storage-v1/records.json"
+    ))
+    .unwrap();
     let values = &fixture["wire_values"];
     wire_values::<SessionStatus>(values, "SessionStatus");
     wire_values::<SessionTitleSource>(values, "SessionTitleSource");

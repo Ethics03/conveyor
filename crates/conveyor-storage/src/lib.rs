@@ -5,9 +5,10 @@
 //! close drains accepted requests before closing the SQLite connection.
 //!
 //! ```no_run
-//! use conveyor::{Store, models::{Message, MessageRole, Session}};
+//! use conveyor_core::models::{Message, MessageRole, Session};
+//! use conveyor_storage::Store;
 //!
-//! # async fn example() -> conveyor::Result<()> {
+//! # async fn example() -> conveyor_storage::Result<()> {
 //! let store = Store::open("conveyor.sqlite").await?;
 //! let session = Session::with_title("Investigate a timeout")?;
 //! store.save_session(&session).await?;
@@ -19,7 +20,9 @@
 //! # }
 //! ```
 
+mod error;
 mod rows;
 mod store;
 
+pub use error::{Error, Result};
 pub use store::Store;

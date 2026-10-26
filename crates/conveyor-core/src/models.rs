@@ -300,11 +300,13 @@ fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::now_v7().simple())
 }
 
-pub(crate) fn now() -> Timestamp {
+/// Current UTC time at the durable format's microsecond precision.
+pub fn now() -> Timestamp {
     Utc::now().trunc_subsecs(6).fixed_offset()
 }
 
-pub(crate) fn clean_title(title: &str) -> Result<String> {
+/// Normalize a session title and reject empty or over-100-character titles.
+pub fn clean_title(title: &str) -> Result<String> {
     // Treat the four ASCII separators as whitespace alongside Unicode whitespace.
     let title = title
         .split(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))

@@ -9,10 +9,9 @@ use tokio::{
 };
 
 use super::rows;
-use crate::{
-    Error, Result,
-    models::{self, *},
-};
+use conveyor_core::models::{self, *};
+
+use crate::{Error, Result};
 
 type QueryFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 type Command = Box<

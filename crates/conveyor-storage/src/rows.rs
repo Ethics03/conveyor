@@ -4,7 +4,9 @@ use chrono::SecondsFormat;
 use serde::de::DeserializeOwned;
 use sqlx::{Row, sqlite::SqliteRow};
 
-use crate::{Error, Result, models::*};
+use conveyor_core::models::*;
+
+use crate::{Error, Result};
 
 pub(super) fn timestamp(value: Timestamp) -> Result<String> {
     if !value.timestamp_subsec_nanos().is_multiple_of(1_000) {

@@ -1,8 +1,8 @@
-//! Typed runtime errors and conversions that preserve their underlying sources.
+//! Typed persistence errors and conversions that preserve their sources.
 
-use crate::models::ApprovalStatus;
+use conveyor_core::models::ApprovalStatus;
 
-/// A recoverable failure from Conveyor's library API.
+/// A recoverable failure from Conveyor's storage API.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -24,10 +24,8 @@ pub enum Error {
     UnsupportedSchema { found: String },
     #[error("Existing database has no Conveyor schema version")]
     UnversionedDatabase,
-    #[error("Session title cannot be empty")]
-    EmptyTitle,
-    #[error("Session title cannot exceed 100 characters")]
-    TitleTooLong,
+    #[error(transparent)]
+    Domain(#[from] conveyor_core::Error),
     #[error("New approvals must be pending and have no resolution timestamp")]
     InvalidNewApproval,
     #[error("Unknown approval: {0}")]
@@ -40,5 +38,5 @@ pub enum Error {
     RunNotBlocked(String),
 }
 
-/// The result type used by Conveyor's library API.
+/// A result from a storage operation.
 pub type Result<T> = std::result::Result<T, Error>;

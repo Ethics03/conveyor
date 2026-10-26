@@ -1,18 +1,24 @@
 //! Conveyor: a self-hosted runtime for persistent agents.
 //!
-//! Domain records and durable SQLite storage form the first migration milestone.
-//! The agent runtime and provider/tool adapters will follow incrementally.
+//! The public entry point for Conveyor's workspace crates.
+//!
+//! Depend on a component crate directly when only that component is needed.
+//! Domain and persistence errors remain separate so core consumers do not need
+//! SQLite or a Tokio runtime.
+//!
+//! ```no_run
+//! use conveyor::{Store, models::Session};
+//!
+//! # async fn example() -> conveyor::storage::Result<()> {
+//! let store = Store::open(":memory:").await?;
+//! let session = Session::default();
+//! store.save_session(&session).await?;
+//! store.close().await?;
+//! # Ok(())
+//! # }
+//! ```
 
-mod agent;
-mod approvals;
-mod cancellation;
-mod context;
-mod error;
-pub mod models;
-mod providers;
-mod runtime;
-pub mod storage;
-mod tools;
-
-pub use error::{Error, Result};
-pub use storage::Store;
+pub use conveyor_core as core;
+pub use conveyor_core::{Error as DomainError, models};
+pub use conveyor_storage as storage;
+pub use conveyor_storage::{Error as StorageError, Store};

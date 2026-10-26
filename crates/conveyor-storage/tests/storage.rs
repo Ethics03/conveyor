@@ -1,4 +1,5 @@
-use conveyor::{Error, Store, models::*};
+use conveyor_core::{Error as DomainError, models::*};
+use conveyor_storage::{Error, Store};
 use serde_json::json;
 use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
 
@@ -99,13 +100,13 @@ async fn automatic_titles_yield_to_user_titles_and_invalid_updates_do_not_modify
     assert!(!store.set_session_title("missing", "Unknown").await.unwrap());
     assert!(matches!(
         store.set_session_title(&session.id, " ").await,
-        Err(Error::EmptyTitle)
+        Err(Error::Domain(DomainError::EmptyTitle))
     ));
     assert!(matches!(
         store
             .set_session_title(&session.id, &"🦀".repeat(101))
             .await,
-        Err(Error::TitleTooLong)
+        Err(Error::Domain(DomainError::TitleTooLong))
     ));
     let loaded = store.get_session(&session.id).await.unwrap().unwrap();
     assert_eq!(loaded.title, "My title");

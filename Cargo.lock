@@ -99,14 +99,33 @@ dependencies = [
 name = "conveyor"
 version = "0.1.0"
 dependencies = [
+ "conveyor-core",
+ "conveyor-storage",
+]
+
+[[package]]
+name = "conveyor-core"
+version = "0.1.0"
+dependencies = [
  "chrono",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "conveyor-storage"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "conveyor-core",
  "serde",
  "serde_json",
  "sqlx",
  "tempfile",
  "thiserror",
  "tokio",
- "uuid",
 ]
 
 [[package]]

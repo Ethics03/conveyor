@@ -1,6 +1,7 @@
 use std::path::Path;
 
-use conveyor::{Store, models::*};
+use conveyor_core::models::*;
+use conveyor_storage::Store;
 use serde::Deserialize;
 use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
 
@@ -29,7 +30,10 @@ async fn snapshot(store: &Store, id: &str) -> Records {
 }
 
 fn fixture() -> Fixture {
-    serde_json::from_str(include_str!("fixtures/storage-v1/records.json")).unwrap()
+    serde_json::from_str(include_str!(
+        "../../../test-support/fixtures/storage-v1/records.json"
+    ))
+    .unwrap()
 }
 
 async fn restore_fixture(path: &Path) -> Store {
@@ -43,10 +47,12 @@ async fn restore_fixture(path: &Path) -> Store {
     .unwrap();
     // The trusted fixture defines tables alphabetically. Disable foreign keys
     // only during restoration, before opening the production Store.
-    sqlx::raw_sql(include_str!("fixtures/storage-v1/database.sql"))
-        .execute(&mut connection)
-        .await
-        .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../test-support/fixtures/storage-v1/database.sql"
+    ))
+    .execute(&mut connection)
+    .await
+    .unwrap();
     connection.close().await.unwrap();
     Store::open(path).await.unwrap()
 }

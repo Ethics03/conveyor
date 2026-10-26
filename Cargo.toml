@@ -1,13 +1,27 @@
 [package]
 name = "conveyor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "A self-hosted runtime for persistent agents"
+readme = "README.md"
+publish.workspace = true
+
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+default-members = [".", "crates/*"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.99.1"
-description = "A self-hosted runtime for persistent agents"
-readme = "README.md"
 publish = false
 
-[dependencies]
+[workspace.dependencies]
+conveyor-core = { path = "crates/conveyor-core" }
+conveyor-storage = { path = "crates/conveyor-storage" }
+
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -16,6 +30,8 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync"] }
 uuid = { version = "1", features = ["v7"] }
 
-[dev-dependencies]
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+
+[dependencies]
+conveyor-core.workspace = true
+conveyor-storage.workspace = true
