@@ -1,0 +1,10 @@
+[package]
+name = "conveyor"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+description = "A self-hosted runtime for persistent agents"
+readme = "README.md"
+publish = false
+
+[dependencies]
