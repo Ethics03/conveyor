@@ -61,7 +61,7 @@ remain synchronous. The library exposes typed errors using `thiserror`;
 
 ```fish
 cargo fmt --all --check
-cargo clippy --workspace --locked --all-targets -- -D warnings
+cargo clippy --workspace --locked --all-targets -- -D warnings -D clippy::wildcard_imports
 cargo test --workspace --locked --all-targets
 cargo test --workspace --locked --doc
 env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --locked --no-deps

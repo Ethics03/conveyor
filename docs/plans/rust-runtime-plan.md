@@ -189,6 +189,7 @@ Follow the [Rust Style Guide](https://doc.rust-lang.org/style-guide/) and
   silently discard intended work.
 - Use default stable rustfmt and Clippy's standard warnings as errors. Explain
   narrow lint exceptions; avoid blanket suppression or every pedantic restriction.
+  Enable `clippy::wildcard_imports` explicitly to check our named-import convention.
 - Prefer safe Rust. Isolate any necessary unsafe platform code and document its
   safety invariants. Review each working slice for both correctness and idiom.
 
@@ -294,7 +295,7 @@ Run from fish at the repository root:
 
 ```fish
 cargo fmt --all --check
-cargo clippy --workspace --locked --all-targets -- -D warnings
+cargo clippy --workspace --locked --all-targets -- -D warnings -D clippy::wildcard_imports
 cargo test --workspace --locked --all-targets
 cargo test --workspace --locked --doc
 env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --locked --no-deps

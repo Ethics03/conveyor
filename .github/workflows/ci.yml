@@ -22,7 +22,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Run Clippy
-        run: cargo clippy --workspace --locked --all-targets -- -D warnings
+        run: cargo clippy --workspace --locked --all-targets -- -D warnings -D clippy::wildcard_imports
       - name: Run tests
         run: cargo test --workspace --locked --all-targets
       - name: Check doc examples
