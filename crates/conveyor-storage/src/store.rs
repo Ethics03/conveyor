@@ -122,6 +122,8 @@ impl Store {
         T: Send + 'static,
         F: for<'a> FnOnce(&'a mut SqliteConnection) -> QueryFuture<'a, T> + Send + 'static,
     {
+        // Single-statement writes use SQLite's implicit transactions through
+        // `call`. This wrapper groups operations that must commit together.
         self.call(move |connection| {
             Box::pin(async move {
                 let mut transaction = connection.begin_with("BEGIN IMMEDIATE").await?;
@@ -143,7 +145,7 @@ impl Store {
     /// Insert a session or update its status/timestamp, preserving its saved title.
     pub async fn save_session(&self, session: &Session) -> Result<()> {
         let session = session.clone();
-        self.write(move |connection| {
+        self.call(move |connection| {
             Box::pin(async move {
                 sqlx::query(
                     "INSERT INTO sessions (id, title, title_source, status, created_at, updated_at)
@@ -206,7 +208,7 @@ impl Store {
 
     async fn set_title(&self, id: &str, title: &str, source: SessionTitleSource) -> Result<bool> {
         let (id, title) = (id.to_owned(), title.to_owned());
-        self.write(move |connection| {
+        self.call(move |connection| {
             Box::pin(async move {
                 let title = models::clean_title(&title)?;
                 Ok(sqlx::query(
@@ -322,10 +324,8 @@ impl Store {
     /// Append an event. There is no update or deletion API for event records.
     pub async fn append_event(&self, event: &Event) -> Result<()> {
         let event = event.clone();
-        self.write(move |connection| {
-            Box::pin(async move { insert_event(connection, &event).await })
-        })
-        .await
+        self.call(move |connection| Box::pin(async move { insert_event(connection, &event).await }))
+            .await
     }
 
     /// List events in timestamp/ID order, applying both filters when provided.
@@ -350,7 +350,7 @@ impl Store {
 
     pub async fn save_approval(&self, approval: &ApprovalRequest) -> Result<()> {
         let approval = approval.clone();
-        self.write(move |connection| {
+        self.call(move |connection| {
             Box::pin(async move { insert_approval(connection, &approval).await })
         })
         .await

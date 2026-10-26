@@ -62,6 +62,78 @@ async fn assert_index_search(
 }
 
 #[tokio::test]
+async fn cancelling_a_backpressured_write_submits_nothing_and_close_drains_the_queue() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("backpressure.sqlite");
+        let store = Arc::new(Store::open(&path).await.unwrap());
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let worker_store = Arc::clone(&store);
+        let blocked_worker = tokio::spawn(async move {
+            worker_store
+                .call(move |_| {
+                    Box::pin(async move {
+                        started_tx.send(()).unwrap();
+                        release_rx.await.unwrap();
+                        Ok(())
+                    })
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        let mut writers = tokio::task::JoinSet::new();
+        for _ in 0..QUEUE_CAPACITY {
+            let store = Arc::clone(&store);
+            writers
+                .spawn(async move { store.append_event(&Event::new(EventType::RunStarted)).await });
+        }
+        while store.sender.lock().unwrap().as_ref().unwrap().capacity() != 0 {
+            tokio::task::yield_now().await;
+        }
+        let cancelled = Event::new(EventType::RunCancelled);
+        {
+            let pending = store.append_event(&cancelled);
+            tokio::pin!(pending);
+            // Poll the write against a full queue, then drop it while it is
+            // waiting for admission. Its event must never reach the worker.
+            tokio::select! {
+                biased;
+                result = &mut pending => panic!("full queue admitted a write: {result:?}"),
+                () = std::future::ready(()) => {}
+            }
+        }
+        let closing_store = Arc::clone(&store);
+        let closing = tokio::spawn(async move { closing_store.close().await });
+        while store.sender.lock().unwrap().is_some() {
+            tokio::task::yield_now().await;
+        }
+        assert!(!closing.is_finished());
+        assert!(matches!(
+            store.append_event(&cancelled).await,
+            Err(Error::StoreClosed)
+        ));
+        release_tx.send(()).unwrap();
+        blocked_worker.await.unwrap().unwrap();
+        while let Some(result) = writers.join_next().await {
+            result.unwrap().unwrap();
+        }
+        closing.await.unwrap().unwrap();
+        let reopened = Store::open(&path).await.unwrap();
+        let events = reopened.list_events(None, None).await.unwrap();
+        assert_eq!(events.len(), QUEUE_CAPACITY);
+        assert!(
+            events
+                .iter()
+                .all(|event| event.kind == EventType::RunStarted)
+        );
+        reopened.close().await.unwrap();
+    })
+    .await
+    .expect("backpressure cancellation or shutdown failed to settle");
+}
+
+#[tokio::test]
 async fn accepted_transactions_finish_after_the_caller_is_cancelled() {
     tokio::time::timeout(Duration::from_secs(5), async {
         for fail in [false, true] {

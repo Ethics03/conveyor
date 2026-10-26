@@ -1,7 +1,7 @@
 //! Conversions between SQLite rows and domain records, including JSON and timestamps.
 
 use chrono::SecondsFormat;
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, value::StrDeserializer};
 use sqlx::{Row, sqlite::SqliteRow};
 
 use conveyor_core::models::*;
@@ -25,7 +25,7 @@ fn date(row: &SqliteRow, name: &str) -> Result<Timestamp> {
 }
 
 fn enumeration<T: DeserializeOwned>(row: &SqliteRow, name: &str) -> Result<T> {
-    Ok(serde_json::from_value(serde_json::Value::String(
+    Ok(T::deserialize(StrDeserializer::<serde_json::Error>::new(
         row.try_get(name)?,
     ))?)
 }
