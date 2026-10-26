@@ -67,6 +67,7 @@ conveyor/
 │   │   │   ├── error.rs
 │   │   │   ├── store.rs
 │   │   │   ├── store/tests.rs
+│   │   │   ├── queries.rs
 │   │   │   ├── rows.rs
 │   │   │   └── schema.sql
 │   │   └── tests/{storage,storage_format}.rs
@@ -204,6 +205,12 @@ See [SQLx connection behavior](https://docs.rs/sqlx/latest/sqlx/struct.SqliteCon
 and [pool cancellation behavior](https://docs.rs/sqlx/latest/sqlx/struct.Pool.html).
 
 State changes and associated events commit atomically. Keep events append-only.
+Single-statement session/title/event/approval writes use SQLite's implicit
+transactions, avoiding separate begin/commit commands. Multi-statement state/event
+operations retain explicit immediate transactions. List queries include only the
+provided predicates so session/run filters can use existing indexes; verify query
+plans as well as result ordering when changing those statements.
+
 Preserve version 1 table names, serialized enum/event values, JSON object shapes,
 prefixed UUIDv7 identifiers, timezone offsets, and microsecond timestamp encoding.
 Reject finer timestamp precision and incompatible/unversioned databases before
@@ -290,5 +297,6 @@ env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --locked --no-deps
 CI runs these checks for PRs targeting `dev` or `main`, and pushes to `dev`.
 Meaningful tests cover transactional failure, conflicting decisions, metadata
 preservation, timestamp/ID ordering, submitted-operation cancellation, interrupted
-close, and versioned database reopen. Add execution/context/provider scenarios
-with their corresponding milestones.
+close, full-queue cancellation/draining, indexed query plans, and versioned
+database reopen. Add execution/context/provider scenarios with their corresponding
+milestones.

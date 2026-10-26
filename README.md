@@ -10,6 +10,9 @@ Storage uses an owned async worker that serializes accepted operations, finishes
 their transactions if callers stop waiting, and drains them on explicit close.
 The version 1 schema and serialized record formats are stable. Unknown schema
 versions and timestamps beyond the format's microsecond precision are rejected.
+Single-statement writes use implicit transactions; related state/event writes
+commit together in explicit transactions. Filtered event and approval queries use
+direct predicates so SQLite can use their existing session/run indexes.
 
 ## Structure
 
@@ -65,7 +68,8 @@ env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --locked --no-deps
 ```
 
 The test suite runs entirely in Rust without model credentials. It covers
-transaction rollback, approval conflicts, cancellation, shutdown, database reopen,
+transaction rollback, approval conflicts, full-queue cancellation and draining,
+indexed query plans, shutdown, database reopen,
 and reading/updating versioned SQL/JSON fixtures while preserving timestamps,
 tool-call correlation, and opaque provider metadata.
 
