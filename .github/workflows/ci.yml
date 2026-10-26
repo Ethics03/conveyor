@@ -1,0 +1,33 @@
+name: Rust checks
+
+on:
+  pull_request:
+    branches: [dev, main]
+  push:
+    branches: [dev]
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Format, lint, test, and document
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned toolchain
+        run: rustup show
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Run tests
+        run: cargo test --locked --all-targets
+      - name: Check doc examples
+        run: cargo test --locked --doc
+      - name: Build documentation
+        run: cargo doc --locked --no-deps
+        env:
+          RUSTDOCFLAGS: -Dwarnings
