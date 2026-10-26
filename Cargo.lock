@@ -99,9 +99,18 @@ dependencies = [
 name = "conveyor"
 version = "0.1.0"
 dependencies = [
+ "conveyor-agent",
  "conveyor-core",
+ "conveyor-harness",
+ "conveyor-http",
+ "conveyor-reqwest",
  "conveyor-storage",
+ "conveyor-tools",
 ]
+
+[[package]]
+name = "conveyor-agent"
+version = "0.1.0"
 
 [[package]]
 name = "conveyor-core"
@@ -113,6 +122,18 @@ dependencies = [
  "thiserror",
  "uuid",
 ]
+
+[[package]]
+name = "conveyor-harness"
+version = "0.1.0"
+
+[[package]]
+name = "conveyor-http"
+version = "0.1.0"
+
+[[package]]
+name = "conveyor-reqwest"
+version = "0.1.0"
 
 [[package]]
 name = "conveyor-storage"
@@ -127,6 +148,10 @@ dependencies = [
  "thiserror",
  "tokio",
 ]
+
+[[package]]
+name = "conveyor-tools"
+version = "0.1.0"
 
 [[package]]
 name = "core-foundation-sys"

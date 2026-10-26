@@ -18,7 +18,12 @@
 //! # }
 //! ```
 
+pub use conveyor_agent as agent;
 pub use conveyor_core as core;
 pub use conveyor_core::{Error as DomainError, models};
+pub use conveyor_harness as harness;
+pub use conveyor_http as http;
+pub use conveyor_reqwest as reqwest;
 pub use conveyor_storage as storage;
 pub use conveyor_storage::{Error as StorageError, Store};
+pub use conveyor_tools as tools;

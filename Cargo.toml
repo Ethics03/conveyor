@@ -19,8 +19,13 @@ rust-version = "1.99.1"
 publish = false
 
 [workspace.dependencies]
+conveyor-agent = { path = "crates/conveyor-agent" }
 conveyor-core = { path = "crates/conveyor-core" }
+conveyor-harness = { path = "crates/conveyor-harness" }
+conveyor-http = { path = "crates/conveyor-http" }
+conveyor-reqwest = { path = "crates/conveyor-reqwest" }
 conveyor-storage = { path = "crates/conveyor-storage" }
+conveyor-tools = { path = "crates/conveyor-tools" }
 
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
@@ -29,9 +34,13 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync"] }
 uuid = { version = "1", features = ["v7"] }
-
 tempfile = "3"
 
 [dependencies]
+conveyor-agent.workspace = true
 conveyor-core.workspace = true
+conveyor-harness.workspace = true
+conveyor-http.workspace = true
+conveyor-reqwest.workspace = true
 conveyor-storage.workspace = true
+conveyor-tools.workspace = true
