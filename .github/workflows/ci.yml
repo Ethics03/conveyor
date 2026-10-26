@@ -20,14 +20,14 @@ jobs:
       - name: Install the pinned toolchain
         run: rustup show
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo fmt --all --check
       - name: Run Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --workspace --locked --all-targets -- -D warnings
       - name: Run tests
-        run: cargo test --locked --all-targets
+        run: cargo test --workspace --locked --all-targets
       - name: Check doc examples
-        run: cargo test --locked --doc
+        run: cargo test --workspace --locked --doc
       - name: Build documentation
-        run: cargo doc --locked --no-deps
+        run: cargo doc --workspace --locked --no-deps
         env:
           RUSTDOCFLAGS: -Dwarnings
