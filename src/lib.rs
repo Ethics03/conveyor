@@ -7,8 +7,10 @@ mod approvals;
 mod cancellation;
 mod context;
 mod error;
-mod models;
+pub mod models;
 mod providers;
 mod runtime;
 mod storage;
 mod tools;
+
+pub use error::{Error, Result};
