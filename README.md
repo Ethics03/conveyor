@@ -13,19 +13,38 @@ versions and timestamps beyond the format's microsecond precision are rejected.
 
 ## Structure
 
-- `src/lib.rs`: crate root, public models, typed errors, and `Store`.
-- `src/models.rs`, `error.rs`, `cancellation.rs`: domain types and runtime primitives.
-- `src/runtime.rs`: session and turn ownership, interruption, and shutdown.
-- `src/agent/`: provider loop, tool batches, and automatic titles.
-- `src/approvals.rs`, `context.rs`: approval policy and derived prompt context.
-- `src/providers/`: fake and Anthropic adapters.
-- `src/tools/`: registry, workspace tools, shell execution, and process helpers.
-- `src/storage/`: SQLite operations, row conversion, and `schema.sql`.
-- `tests/`: model/storage integration suites and versioned storage fixtures.
-- `examples/`: runnable examples as complete runtime paths become available.
-- `docs/plans/rust-runtime-plan.md`: architecture, Rust conventions, and milestones.
+Conveyor is a Cargo workspace. The root `conveyor` crate re-exports the component
+crates; consumers can also depend on a component directly.
 
-The module boundaries and implementation milestones are in the
+```text
+conveyor/
+├── Cargo.toml                  # workspace and public conveyor package
+├── Cargo.lock                  # shared resolved dependencies
+├── src/lib.rs                  # public re-exports
+├── crates/
+│   ├── conveyor-core/          # domain records and provider contracts
+│   ├── conveyor-http/          # async HTTP transport contracts
+│   ├── conveyor-reqwest/       # reqwest transport implementation
+│   ├── conveyor-storage/      # async SQLite persistence
+│   ├── conveyor-tools/        # concrete tools and registry
+│   ├── conveyor-agent/        # turns, context, approvals, and tool orchestration
+│   └── conveyor-harness/      # session ownership, interruption, and shutdown
+├── test-support/fixtures/     # shared versioned SQL/JSON fixtures
+├── examples/
+└── docs/plans/rust-runtime-plan.md
+```
+
+Domain records in `conveyor-core` and persistence in `conveyor-storage` are
+implemented, with their tests inside each crate. The other crates and provider
+modules are scaffolds. Add implementations and dependencies as their migration
+steps arrive. `conveyor-http` defines transport contracts; `conveyor-reqwest`
+will implement them. Provider wire conversion belongs in `conveyor-core`.
+
+Domain and storage APIs expose their own typed `Error` and `Result`. The facade
+re-exports the errors as `DomainError` and `StorageError`; it does not combine
+them into a shared error enum that would couple core consumers to SQLite.
+
+The dependency direction and implementation milestones are in the
 [runtime plan](docs/plans/rust-runtime-plan.md).
 
 ## Development
@@ -38,11 +57,11 @@ remain synchronous. The library exposes typed errors using `thiserror`;
 `anyhow` can provide reporting context at a future executable boundary.
 
 ```fish
-cargo fmt --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked --all-targets
-cargo test --locked --doc
-env RUSTDOCFLAGS=-Dwarnings cargo doc --locked --no-deps
+cargo fmt --all --check
+cargo clippy --workspace --locked --all-targets -- -D warnings
+cargo test --workspace --locked --all-targets
+cargo test --workspace --locked --doc
+env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --locked --no-deps
 ```
 
 The test suite runs entirely in Rust without model credentials. It covers
@@ -50,7 +69,11 @@ transaction rollback, approval conflicts, cancellation, shutdown, database reope
 and reading/updating versioned SQL/JSON fixtures while preserving timestamps,
 tool-call correlation, and opaque provider metadata.
 
-Development PRs target `dev`. Rust source lives at the repository root; `main`
+Root Cargo commands select every member by default; CI also selects the entire
+workspace explicitly. All members inherit the version, edition, compiler
+requirement, and publish setting from the root manifest.
+
+Development PRs target `dev`. The workspace lives at the repository root; `main`
 remains the stable branch.
 
 The next milestone is a complete fake-provider turn: create a session, persist

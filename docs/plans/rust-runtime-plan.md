@@ -29,77 +29,112 @@ skills, schedules, and multi-agent execution are later milestones. Persisted
 approval records provide an audit trail; crash-resumable continuations and
 exactly-once external side effects require separate designs.
 
-## Package and modules
+## Workspace and crate boundaries
 
-Start with one Cargo package and library crate named `conveyor`. Introduce
-additional crates when independent consumers, dependency isolation, or build
-costs justify them. Expose a small public API and keep helpers private or
-`pub(crate)`. Add an executable when the host/client protocol is defined.
+Use separate Cargo library crates from the start. The repository root is both
+the workspace and the public `conveyor` package, whose source contains re-exports.
+Keep business logic in component crates. Add an executable when the host/client
+protocol is defined.
 
-The current module layout is:
+The current workspace layout is:
 
 ```text
 conveyor/
-├── Cargo.toml
-├── Cargo.lock
+├── Cargo.toml                         # workspace and facade package
+├── Cargo.lock                         # shared lockfile
 ├── rust-toolchain.toml
 ├── README.md
 ├── .github/workflows/ci.yml
 ├── docs/plans/rust-runtime-plan.md
-├── src/
-│   ├── lib.rs
-│   ├── models.rs
-│   ├── error.rs
-│   ├── cancellation.rs
-│   ├── runtime.rs
-│   ├── approvals.rs
-│   ├── context.rs
-│   ├── agent.rs
-│   ├── agent/
-│   │   ├── run.rs
-│   │   ├── tool_batch.rs
-│   │   └── titles.rs
-│   ├── providers.rs
-│   ├── providers/
-│   │   ├── fake.rs
-│   │   └── anthropic.rs
-│   ├── tools.rs
-│   ├── tools/
-│   │   ├── registry.rs
-│   │   ├── workspace.rs
-│   │   ├── shell.rs
-│   │   └── process.rs
-│   ├── storage.rs
-│   └── storage/
-│       ├── store.rs
-│       ├── store/tests.rs
-│       ├── rows.rs
-│       └── schema.sql
-├── tests/
-│   ├── models.rs
-│   ├── storage.rs
-│   ├── storage_format.rs
-│   ├── support/
-│   └── fixtures/storage-v1/
-│       ├── records.json
-│       └── database.sql
+├── src/lib.rs                         # public re-exports
+├── crates/
+│   ├── conveyor-core/
+│   │   ├── Cargo.toml
+│   │   ├── src/
+│   │   │   ├── lib.rs
+│   │   │   ├── models.rs
+│   │   │   ├── error.rs
+│   │   │   ├── cancellation.rs
+│   │   │   ├── providers.rs
+│   │   │   └── providers/{fake,anthropic}.rs
+│   │   └── tests/models.rs
+│   ├── conveyor-http/                 # Cargo.toml and src/lib.rs
+│   ├── conveyor-reqwest/              # Cargo.toml and src/lib.rs
+│   ├── conveyor-storage/
+│   │   ├── Cargo.toml
+│   │   ├── src/
+│   │   │   ├── lib.rs
+│   │   │   ├── error.rs
+│   │   │   ├── store.rs
+│   │   │   ├── store/tests.rs
+│   │   │   ├── rows.rs
+│   │   │   └── schema.sql
+│   │   └── tests/{storage,storage_format}.rs
+│   ├── conveyor-tools/
+│   │   ├── Cargo.toml
+│   │   └── src/{lib,registry,workspace,shell,process}.rs
+│   ├── conveyor-agent/
+│   │   ├── Cargo.toml
+│   │   └── src/{lib,run,context,approvals,tool_batch,titles}.rs
+│   └── conveyor-harness/
+│       ├── Cargo.toml
+│       └── src/{lib,runtime}.rs
+├── test-support/fixtures/storage-v1/
+│   ├── records.json
+│   └── database.sql
 └── examples/
 ```
 
-Domain and storage modules are implemented. The other source modules currently
-document their intended boundaries. Add working behavior, integration suites,
-and runnable examples incrementally. No placeholder passing tests or fake APIs.
+Domain records and validation in `conveyor-core`, and async persistence in
+`conveyor-storage`, are implemented. The other crates and core provider modules
+are scaffolds documenting their boundaries. Add working behavior, integration
+suites, and runnable examples incrementally. Do not add placeholder passing tests
+or successful no-op implementations.
 
-| Module | Owns | Boundary |
+Every member inherits shared package metadata. Dependency requirements live in
+`workspace.dependencies`, and each crate opts into only the dependencies its code
+uses. The facade depends on and re-exports component crates. Root commands select
+all members using `default-members`; CI uses explicit `--workspace` selection.
+
+| Crate | Owns | Boundary |
 | --- | --- | --- |
-| `models` | Domain records and serialized state enums | No database, filesystem, HTTP, or runtime dependencies |
-| `providers` | Provider contract, model limits, request/response/replay types | No store access or tool execution |
-| `tools` | Tool metadata, typed arguments, registry, context, concrete execution | No approval prompts, provider calls, or SQL |
-| `approvals` | Allow/ask/deny policy and async decision contract | Orchestration persists decisions and dispatches tools |
-| `context` | Pure derivation of bounded provider requests | Preserves durable history; no HTTP or SQL |
-| `storage` | Schema, encoding, transactions, queries, connection lifecycle | Only production module that executes SQL |
-| `agent` | Run transitions, provider iterations, approval coordination, tool batches | Uses contracts without direct filesystem/HTTP/SQL |
-| `runtime` | Shared resources, sessions, active turns, title coordination, shutdown | Client-facing library API without a UI/transport dependency |
+| `conveyor` | Public entry point and re-exports | No business logic |
+| `conveyor-core` | Domain records/validation, provider and tool contracts, provider wire conversion | No storage, concrete tools, or agent orchestration |
+| `conveyor-http` | Async transport contracts and transport-level types/errors | No provider schemas, SQL, or orchestration |
+| `conveyor-reqwest` | Async HTTP backend implementing transport contracts | No provider wire conversion or agent policy |
+| `conveyor-storage` | SQLite schema, encoding, transactions, queries, connection lifecycle | Only production crate that executes SQL |
+| `conveyor-tools` | Concrete tools, registry, workspace/process execution | No approval prompts, provider calls, or SQL |
+| `conveyor-agent` | Run transitions, context planning, approvals, batches, titles | Uses contracts without direct filesystem/HTTP/SQL |
+| `conveyor-harness` | Sessions, shared resources, active turns, interruption, shutdown | Composes components without a UI or server protocol |
+
+The intended dependency direction as implementations arrive is:
+
+```text
+conveyor              -> component crates (public re-exports)
+conveyor-harness      -> conveyor-agent, conveyor-core, conveyor-storage, conveyor-tools
+conveyor-agent        -> conveyor-core, conveyor-storage, conveyor-tools
+conveyor-tools        -> conveyor-core
+conveyor-storage      -> conveyor-core
+conveyor-core         -> conveyor-http, optional conveyor-reqwest backend
+conveyor-reqwest      -> conveyor-http, reqwest
+conveyor-http         -> transport-level dependencies only
+```
+
+Scaffolds declare no implementation dependencies yet. Add each edge when code
+needs it; keep the graph acyclic. Provider contracts/adapters are Conveyor-owned.
+Use reqwest and Serde for transport and wire encoding when implementing Anthropic.
+Keep live-provider/backend features optional so model-only consumers need no HTTP
+client or executor.
+
+Each crate owns its errors. Storage wraps domain validation failures with a typed
+source; core never imports storage errors. The facade exposes `DomainError` and
+`StorageError`, with crate-specific `Result` aliases under `core` and `storage`.
+Expose only the helpers needed across crate boundaries, such as shared title
+validation and microsecond-precision UTC timestamps.
+
+Context planning remains pure and preserves durable history. Approval policy and
+async decisions belong to `conveyor-agent`; orchestration persists decisions and
+dispatches tools. Put shared tool contracts in core and implementations in tools.
 
 Register each tool's schema, permission, parallel-safety flag, and executor as one
 definition. Retain the advertised catalog throughout a run's dispatch so the
@@ -183,7 +218,8 @@ use disposable databases and require no external interpreter or credentials.
 `Runtime` owns shared resources and the active-turn registry. Allow one active
 turn per session, with separate cancellation signals. Use a guard to release
 bookkeeping on every exit path; await async cleanup and terminal persistence
-explicitly. Keep state transitions in `agent/run.rs` testable independently of I/O.
+explicitly. Keep state transitions in `conveyor-agent/src/run.rs` testable
+independently of I/O.
 
 Preflight the complete tool batch. Read-only tools may run automatically; write
 and dangerous tools require an async approval decision. Missing resolvers fail
@@ -208,13 +244,6 @@ separates policy/approval from execution, and its
 [parallel execution layer](https://github.com/openai/codex/blob/8c076942cb70fba8e5c4732c23f1faabc4aed484/codex-rs/core/src/tools/parallel.rs)
 retains advertised tool context and tests cancellation races. Borrow these
 boundaries while keeping Conveyor proportional to its current scope.
-
-Rig is a secondary reference for provider/tool APIs. Its
-[harness](https://github.com/0xPlaygrounds/rig/blob/5bada84e36ab5b4530d3d2cd425cf148233851ae/crates/rig-harness/README.md)
-uses a Bevy/ECS kernel and plugins. Its
-[tools](https://github.com/0xPlaygrounds/rig/blob/5bada84e36ab5b4530d3d2cd425cf148233851ae/crates/rig-tools/src/lib.rs)
-declare resource footprints and return structured facts. Adopting those crates
-requires evaluating their contracts; a full ECS/plugin host is a separate choice.
 
 Goose's [state machine](https://github.com/aaif-goose/goose/blob/34a222e3f2b95d8b4a43482b53c2cc957ecce26d/crates/goose-agent/src/machine.rs)
 and [confirmation coordinator](https://github.com/aaif-goose/goose/blob/34a222e3f2b95d8b4a43482b53c2cc957ecce26d/crates/goose/src/agents/tool_confirmation_coordinator.rs)
@@ -251,11 +280,11 @@ Benchmark claims require comparable workloads and release build settings.
 Run from fish at the repository root:
 
 ```fish
-cargo fmt --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked --all-targets
-cargo test --locked --doc
-env RUSTDOCFLAGS=-Dwarnings cargo doc --locked --no-deps
+cargo fmt --all --check
+cargo clippy --workspace --locked --all-targets -- -D warnings
+cargo test --workspace --locked --all-targets
+cargo test --workspace --locked --doc
+env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --locked --no-deps
 ```
 
 CI runs these checks for PRs targeting `dev` or `main`, and pushes to `dev`.
