@@ -3,8 +3,10 @@
 A self-hosted runtime for persistent agents, implemented in Rust.
 
 The first runtime milestone is implemented: domain records and asynchronous
-SQLite storage for sessions, runs, messages, events, and approvals. The agent
-loop, providers, tools, and runtime lifecycle remain subsequent steps.
+SQLite storage for sessions, runs, messages, events, and approvals. The core
+contracts are also in place: cancellation tokens, the provider interface with
+fake and Anthropic adapters, and typed tool contracts. The agent loop, concrete
+tools, the reqwest transport, and runtime lifecycle remain subsequent steps.
 
 Storage uses an owned async worker that serializes accepted operations, finishes
 their transactions if callers stop waiting, and drains them on explicit close.
@@ -25,7 +27,7 @@ conveyor/
 ├── Cargo.lock                  # shared resolved dependencies
 ├── src/lib.rs                  # public re-exports
 ├── crates/
-│   ├── conveyor-core/          # domain records and provider contracts
+│   ├── conveyor-core/          # domain records, provider and tool contracts
 │   ├── conveyor-http/          # async HTTP transport contracts
 │   ├── conveyor-reqwest/       # reqwest transport implementation
 │   ├── conveyor-storage/      # async SQLite persistence
@@ -37,11 +39,12 @@ conveyor/
 └── docs/plans/rust-runtime-plan.md
 ```
 
-Domain records in `conveyor-core` and persistence in `conveyor-storage` are
-implemented, with their tests inside each crate. The other crates and provider
-modules are scaffolds. Add implementations and dependencies as their migration
-steps arrive. `conveyor-http` defines transport contracts; `conveyor-reqwest`
-will implement them. Provider wire conversion belongs in `conveyor-core`.
+`conveyor-core`, `conveyor-http`, and `conveyor-storage` are implemented, with
+their tests inside each crate. The other crates are scaffolds. Add
+implementations and dependencies as their migration steps arrive.
+`conveyor-http` defines transport contracts; `conveyor-reqwest` will implement
+them. Provider wire conversion belongs in `conveyor-core`, where the Anthropic
+adapter sits behind the `anthropic` feature.
 
 Domain and storage APIs expose their own typed `Error` and `Result`. The facade
 re-exports the errors as `DomainError` and `StorageError`; it does not combine

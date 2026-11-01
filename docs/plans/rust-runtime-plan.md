@@ -1,7 +1,9 @@
 # Conveyor runtime: structure and implementation plan
 
-Status: milestone 1 (domain records and async storage) is implemented.
-The agent runtime, provider adapters, and concrete tools remain subsequent work.
+Status: milestone 1 (domain records and async storage) is implemented, as are
+the `conveyor-core` contracts (cancellation, providers with fake and Anthropic
+adapters, and tools) and the `conveyor-http` transport contract. The agent
+runtime, concrete tools, and the reqwest transport remain subsequent work.
 
 ## Product and scope
 
@@ -56,8 +58,9 @@ conveyor/
 │   │   │   ├── error.rs
 │   │   │   ├── cancellation.rs
 │   │   │   ├── providers.rs
-│   │   │   └── providers/{fake,anthropic}.rs
-│   │   └── tests/models.rs
+│   │   │   ├── providers/{fake,anthropic}.rs
+│   │   │   └── tools.rs
+│   │   └── tests/{models,cancellation,providers,tools,anthropic}.rs
 │   ├── conveyor-http/                 # Cargo.toml and src/lib.rs
 │   ├── conveyor-reqwest/              # Cargo.toml and src/lib.rs
 │   ├── conveyor-storage/
@@ -86,9 +89,8 @@ conveyor/
 └── examples/
 ```
 
-Domain records and validation in `conveyor-core`, and async persistence in
-`conveyor-storage`, are implemented. The other crates and core provider modules
-are scaffolds documenting their boundaries. Add working behavior, integration
+`conveyor-core`, `conveyor-http`, and `conveyor-storage` are implemented. The
+other crates are scaffolds documenting their boundaries. Add working behavior, integration
 suites, and runnable examples incrementally. Do not add placeholder passing tests
 or successful no-op implementations.
 
@@ -116,7 +118,7 @@ conveyor-harness      -> conveyor-agent, conveyor-core, conveyor-storage, convey
 conveyor-agent        -> conveyor-core, conveyor-storage, conveyor-tools
 conveyor-tools        -> conveyor-core
 conveyor-storage      -> conveyor-core
-conveyor-core         -> conveyor-http, optional conveyor-reqwest backend
+conveyor-core         -> conveyor-http (`anthropic` feature), optional conveyor-reqwest backend
 conveyor-reqwest      -> conveyor-http, reqwest
 conveyor-http         -> transport-level dependencies only
 ```
