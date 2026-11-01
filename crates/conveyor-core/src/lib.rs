@@ -8,4 +8,5 @@ mod error;
 pub mod models;
 mod providers;
 
+pub use cancellation::{CancellationToken, Cancelled, DEFAULT_CANCELLATION_REASON};
 pub use error::{Error, Result};
