@@ -8,6 +8,12 @@ pub enum Error {
     EmptyTitle,
     #[error("Session title cannot exceed 100 characters")]
     TitleTooLong,
+    #[error("Context window must be positive")]
+    EmptyContextWindow,
+    #[error("Maximum output tokens must be positive")]
+    EmptyOutputLimit,
+    #[error("Maximum output tokens must be smaller than the context window")]
+    OutputExceedsContextWindow,
 }
 
 /// A result from domain construction or validation.
