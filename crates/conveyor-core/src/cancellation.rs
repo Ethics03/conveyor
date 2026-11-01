@@ -1,4 +1,4 @@
-//! Per-turn cancellation signals and the first accepted cancellation reason.
+//! Cooperative cancellation with a first-wins reason.
 
 use std::{
     pin::pin,
@@ -13,7 +13,7 @@ pub const DEFAULT_CANCELLATION_REASON: &str = "Run cancelled by user";
 /// A cloneable, cooperative cancellation signal shared by one turn's work.
 ///
 /// The first accepted [`cancel`](Self::cancel) call wins and fixes the reason;
-/// later calls are ignored. Waiting needs no particular executor.
+/// later calls are ignored.
 ///
 /// ```
 /// use conveyor_core::CancellationToken;

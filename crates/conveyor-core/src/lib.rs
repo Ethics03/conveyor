@@ -1,8 +1,6 @@
-//! Shared domain records, and provider contracts for Conveyor.
+//! Domain records, cancellation, and provider and tool contracts for Conveyor.
 //!
-//! This crate has no dependency on storage, concrete tools, or agent
-//! orchestration. The Anthropic adapter is behind the `anthropic` feature, so
-//! model-only consumers need no HTTP transport or timer.
+//! The Anthropic adapter requires the `anthropic` feature.
 
 mod cancellation;
 mod error;
@@ -15,5 +13,5 @@ use std::{future::Future, pin::Pin};
 pub use cancellation::{CancellationToken, Cancelled, DEFAULT_CANCELLATION_REASON};
 pub use error::{Error, Result};
 
-/// A boxed `Send` future, used at object-safe async boundaries.
+/// A boxed `Send` future for object-safe async traits.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;

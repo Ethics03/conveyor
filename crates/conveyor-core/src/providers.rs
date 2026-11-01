@@ -1,8 +1,6 @@
-//! Provider contracts, neutral request and response types, and configuration.
+//! The provider contract and provider-neutral request and response types.
 //!
 //! A [`Provider`] turns one [`ProviderRequest`] into one [`ProviderResponse`].
-//! Adapters own their wire formats; these types stay provider-neutral so
-//! context planning and orchestration never depend on a particular API.
 
 #[cfg(feature = "anthropic")]
 pub mod anthropic;
@@ -204,10 +202,8 @@ pub struct ProviderRequest {
     pub model: Option<String>,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
-    /// The local context planner's compaction trigger, in input tokens.
-    ///
-    /// Providers with native compaction use it to compact before the local
-    /// fallback would; others ignore it.
+    /// The input-token count at which the caller compacts locally. Providers
+    /// with native compaction compact before it; others ignore it.
     pub compaction_trigger_tokens: Option<u32>,
 }
 
@@ -231,8 +227,7 @@ pub struct ProviderResponse {
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
     pub finish_reason: FinishReason,
-    /// Provider details persisted with the assistant message, such as the
-    /// provider name, model, response ID, and usage.
+    /// Provider-specific details, such as the model, response ID, and usage.
     pub raw: JsonObject,
     pub replay_state: Option<ReplayState>,
 }
@@ -301,11 +296,11 @@ pub enum ProviderError {
     InvalidResponse(String),
 }
 
-/// A source of model responses, shared across turns.
+/// A source of model responses.
 ///
 /// Implementations are `Send + Sync` and used through `Arc<dyn Provider>`.
 pub trait Provider: Debug + Send + Sync {
-    /// A stable provider name, such as `anthropic`, recorded with responses.
+    /// A stable provider name, such as `anthropic`.
     fn name(&self) -> &str;
 
     /// Token limits for `model`, or for the provider's default model.
@@ -313,8 +308,8 @@ pub trait Provider: Debug + Send + Sync {
 
     /// Generate one response.
     ///
-    /// Dropping the returned future cancels the request; a provider keeps no
-    /// per-request state, so the next call is unaffected.
+    /// Dropping the returned future cancels the request without affecting
+    /// later calls.
     fn generate(
         &self,
         request: ProviderRequest,

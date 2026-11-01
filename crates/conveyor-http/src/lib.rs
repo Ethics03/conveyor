@@ -1,9 +1,7 @@
 //! Async HTTP transport contracts for Conveyor's provider adapters.
 //!
-//! Provider adapters build [`Request`]s and interpret [`Response`]s; an
-//! [`HttpTransport`] only moves bytes. Keep this crate independent of provider
-//! schemas, storage, and orchestration. The reqwest implementation belongs in
-//! `conveyor-reqwest`.
+//! Callers build [`Request`]s and interpret [`Response`]s; an [`HttpTransport`]
+//! only moves bytes.
 
 use std::{error::Error as StdError, fmt, future::Future, pin::Pin};
 

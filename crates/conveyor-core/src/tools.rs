@@ -1,65 +1,7 @@
-//! Tool contracts shared by concrete tools, the registry, and orchestration.
+//! Typed tool contracts and their object-safe form.
 //!
-//! Concrete tools implement the typed [`Tool`] trait. The registry stores them
-//! as [`DynTool`] objects, which decode JSON arguments and erase output and
-//! error types at that boundary only.
-//!
-//! ```
-//! use std::convert::Infallible;
-//!
-//! use conveyor_core::{
-//!     CancellationToken,
-//!     models::{JsonObject, ToolPermission},
-//!     tools::{DynTool, Tool, ToolContext},
-//! };
-//! use serde::Deserialize;
-//! use serde_json::json;
-//!
-//! #[derive(Deserialize)]
-//! struct EchoArgs {
-//!     text: String,
-//! }
-//!
-//! struct Echo;
-//!
-//! impl Tool for Echo {
-//!     const NAME: &'static str = "echo";
-//!     type Args = EchoArgs;
-//!     type Output = String;
-//!     type Error = Infallible;
-//!
-//!     fn description(&self) -> String {
-//!         "Repeat the given text".into()
-//!     }
-//!
-//!     fn parameters(&self) -> JsonObject {
-//!         let schema = json!({
-//!             "type": "object",
-//!             "properties": {"text": {"type": "string"}},
-//!             "required": ["text"],
-//!         });
-//!         schema.as_object().cloned().unwrap_or_default()
-//!     }
-//!
-//!     fn permission(&self) -> ToolPermission {
-//!         ToolPermission::Read
-//!     }
-//!
-//!     async fn call(&self, args: EchoArgs, _context: &ToolContext) -> Result<String, Infallible> {
-//!         Ok(args.text)
-//!     }
-//! }
-//!
-//! # #[tokio::main(flavor = "current_thread")]
-//! # async fn main() -> Result<(), conveyor_core::tools::ToolError> {
-//! let context = ToolContext::new(".", CancellationToken::new());
-//! let mut arguments = JsonObject::new();
-//! arguments.insert("text".into(), json!("hi"));
-//! let output = DynTool::execute(&Echo, arguments, &context).await?;
-//! assert_eq!(output.content(), "hi");
-//! # Ok(())
-//! # }
-//! ```
+//! Tools implement [`Tool`]; callers dispatch through [`DynTool`], which decodes
+//! JSON arguments and erases output and error types.
 
 use std::{
     borrow::Cow,
@@ -107,9 +49,9 @@ impl ToolContext {
 /// A successful tool's model-visible output.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ToolOutput {
-    /// Plain text, persisted with the `text/plain` content type.
+    /// Plain text (`text/plain`).
     Text(String),
-    /// Structured output, encoded as compact JSON with `application/json`.
+    /// Structured output, rendered as compact JSON (`application/json`).
     Json(Value),
 }
 
@@ -128,7 +70,7 @@ impl ToolOutput {
         }
     }
 
-    /// The MIME type recorded in the tool result's metadata.
+    /// The output's MIME type.
     pub fn content_type(&self) -> &'static str {
         match self {
             Self::Text(_) => "text/plain",
@@ -156,9 +98,6 @@ impl From<Value> for ToolOutput {
 }
 
 /// Why a tool call produced no output.
-///
-/// Every variant except [`Cancelled`](Self::Cancelled) becomes a model-visible
-/// failed result; cancellation stops the turn instead.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ToolError {
@@ -223,10 +162,8 @@ pub trait Tool: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send;
 }
 
-/// An object-safe tool, as stored by the registry.
-///
-/// Every [`Tool`] implements it. Implement it directly only for tools whose
-/// definition is known at runtime.
+/// An object-safe [`Tool`]. Implemented for every `Tool`; implement it directly
+/// only for tools defined at runtime.
 pub trait DynTool: Send + Sync {
     /// The definition advertised to the model.
     fn definition(&self) -> ToolDefinition;

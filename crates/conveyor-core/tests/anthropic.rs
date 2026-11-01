@@ -127,7 +127,7 @@ fn user(content: &str) -> ProviderRequest {
 }
 
 #[tokio::test]
-async fn requests_encode_messages_tools_and_headers_like_the_python_adapter() {
+async fn requests_encode_messages_tools_and_headers() {
     let transport = ScriptedTransport::new([success(json!([]), "end_turn")]);
     let provider = provider(&transport);
     let call = |id: &str| ToolCall {

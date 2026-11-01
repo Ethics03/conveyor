@@ -38,7 +38,7 @@ fn model_limits_reserve_output_inside_a_positive_window() {
 }
 
 #[test]
-fn finish_reasons_keep_their_python_wire_spellings() {
+fn finish_reasons_keep_their_wire_spellings() {
     let reasons = [
         FinishReason::Stop,
         FinishReason::ToolUse,
@@ -155,6 +155,7 @@ async fn the_fake_provider_replays_its_script_then_answers_ok() {
         Ok(ProviderResponse::message("first")),
         Err(ProviderError::InvalidResponse("scripted".into())),
     ]);
+    assert_eq!(provider.model_limits(None), DEFAULT_FAKE_MODEL_LIMITS);
     let request = ProviderRequest::new(vec![ProviderMessage::user("hi")]);
 
     assert_eq!(
@@ -188,7 +189,6 @@ async fn the_fake_provider_is_usable_as_a_shared_trait_object() {
     let provider: Arc<dyn Provider> = Arc::new(FakeProvider::default().with_model_limits(limits));
     assert_eq!(provider.name(), "fake");
     assert_eq!(provider.model_limits(Some("any")), limits);
-    assert_ne!(limits, DEFAULT_FAKE_MODEL_LIMITS);
 
     let request = ProviderRequest::new(vec![ProviderMessage::user("hi")]);
     let response = provider.generate(request).await.unwrap();

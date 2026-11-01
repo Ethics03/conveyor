@@ -1,4 +1,4 @@
-//! Domain validation errors, independent of persistence and transport.
+//! Domain validation errors.
 
 /// Invalid domain input supplied to Conveyor.
 #[derive(Debug, thiserror::Error)]

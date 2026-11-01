@@ -80,7 +80,7 @@ impl From<ApprovalDecision> for ApprovalStatus {
     }
 }
 
-/// Agent configuration; model and tool selection are resolved by the runtime.
+/// Agent configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Agent {
     pub id: String,
@@ -140,7 +140,7 @@ impl Session {
     }
 }
 
-/// A persisted agent run. Required identities have no empty defaults.
+/// A persisted agent run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Run {
     pub id: String,

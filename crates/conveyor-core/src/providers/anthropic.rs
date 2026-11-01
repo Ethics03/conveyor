@@ -22,7 +22,7 @@ use crate::{
     models::{JsonObject, ToolCall},
 };
 
-/// The provider name recorded with responses and replay state.
+/// The provider name used in responses and replay state.
 pub const PROVIDER_NAME: &str = "anthropic";
 pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -81,7 +81,7 @@ pub struct AnthropicConfig {
 }
 
 impl AnthropicConfig {
-    /// Defaults matching the Python adapter, authenticated with `api_key`.
+    /// Default settings, authenticated with `api_key`.
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
@@ -523,7 +523,7 @@ fn finish_reason(stop_reason: Option<&str>) -> FinishReason {
     }
 }
 
-/// Drop null object fields recursively, matching the SDK's usage dump.
+/// Drop null object fields recursively.
 fn without_nulls(value: Value) -> Value {
     match value {
         Value::Object(object) => Value::Object(
