@@ -7,6 +7,7 @@ mod cancellation;
 mod error;
 pub mod models;
 pub mod providers;
+pub mod tools;
 
 use std::{future::Future, pin::Pin};
 
