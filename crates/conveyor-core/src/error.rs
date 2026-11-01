@@ -14,6 +14,12 @@ pub enum Error {
     EmptyOutputLimit,
     #[error("Maximum output tokens must be smaller than the context window")]
     OutputExceedsContextWindow,
+    #[error("Compaction trigger must be at least {minimum} tokens")]
+    CompactionTriggerTooLow { minimum: u32 },
+    #[error("API key contains characters not allowed in an HTTP header")]
+    InvalidApiKey,
+    #[error("Provider base URL must be an absolute http(s) URL")]
+    InvalidBaseUrl,
 }
 
 /// A result from domain construction or validation.

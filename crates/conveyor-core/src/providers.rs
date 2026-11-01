@@ -4,6 +4,8 @@
 //! Adapters own their wire formats; these types stay provider-neutral so
 //! context planning and orchestration never depend on a particular API.
 
+#[cfg(feature = "anthropic")]
+pub mod anthropic;
 pub mod fake;
 
 use std::{error::Error as StdError, fmt::Debug, time::Duration};

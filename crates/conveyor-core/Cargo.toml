@@ -6,8 +6,14 @@ rust-version.workspace = true
 publish.workspace = true
 description = "Conveyor domain records and provider contracts"
 
+[features]
+# The Anthropic Messages API adapter. It needs an `HttpTransport` and a Tokio
+# runtime with timers enabled.
+anthropic = ["dep:conveyor-http", "tokio/time"]
+
 [dependencies]
 chrono.workspace = true
+conveyor-http = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -15,4 +21,9 @@ tokio = { workspace = true, features = ["sync"] }
 uuid.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+conveyor-http.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util", "time"] }
+
+[[test]]
+name = "anthropic"
+required-features = ["anthropic"]

@@ -1,7 +1,8 @@
 //! Shared domain records, and provider contracts for Conveyor.
 //!
 //! This crate has no dependency on storage, concrete tools, or agent
-//! orchestration.
+//! orchestration. The Anthropic adapter is behind the `anthropic` feature, so
+//! model-only consumers need no HTTP transport or timer.
 
 mod cancellation;
 mod error;
