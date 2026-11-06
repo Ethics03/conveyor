@@ -5,3 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 description = "Session ownership, interruption, and shutdown for Conveyor"
+
+[dependencies]
+conveyor-agent.workspace = true
+conveyor-core.workspace = true
+conveyor-storage.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

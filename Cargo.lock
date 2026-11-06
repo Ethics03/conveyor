@@ -111,6 +111,14 @@ dependencies = [
 [[package]]
 name = "conveyor-agent"
 version = "0.1.0"
+dependencies = [
+ "chrono",
+ "conveyor-core",
+ "conveyor-storage",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "conveyor-core"
@@ -128,6 +136,14 @@ dependencies = [
 [[package]]
 name = "conveyor-harness"
 version = "0.1.0"
+dependencies = [
+ "conveyor-agent",
+ "conveyor-core",
+ "conveyor-storage",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "conveyor-http"
