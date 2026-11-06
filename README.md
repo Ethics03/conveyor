@@ -5,8 +5,10 @@ A self-hosted runtime for persistent agents, implemented in Rust.
 The first runtime milestone is implemented: domain records and asynchronous
 SQLite storage for sessions, runs, messages, events, and approvals. The core
 contracts are also in place: cancellation tokens, the provider interface with
-fake and Anthropic adapters, and typed tool contracts. The agent loop, concrete
-tools, the reqwest transport, and runtime lifecycle remain subsequent steps.
+fake and Anthropic adapters, and typed tool contracts. A complete turn runs
+end to end against the fake provider: `conveyor-harness` owns each turn as a
+background task with interruption and orderly shutdown. Concrete tools,
+approvals, the reqwest transport, and context planning remain subsequent steps.
 
 Storage uses an owned async worker that serializes accepted operations, finishes
 their transactions if callers stop waiting, and drains them on explicit close.
@@ -39,8 +41,9 @@ conveyor/
 └── docs/plans/rust-runtime-plan.md
 ```
 
-`conveyor-core`, `conveyor-http`, and `conveyor-storage` are implemented, with
-their tests inside each crate. The other crates are scaffolds. Add
+`conveyor-core`, `conveyor-http`, `conveyor-storage`, `conveyor-agent` (run
+loop and provider messages), and `conveyor-harness` are implemented, with their
+tests inside each crate. `conveyor-tools` and `conveyor-reqwest` are scaffolds. Add
 implementations and dependencies as their migration steps arrive.
 `conveyor-http` defines transport contracts; `conveyor-reqwest` will implement
 them. Provider wire conversion belongs in `conveyor-core`, where the Anthropic
@@ -83,5 +86,5 @@ requirement, and publish setting from the root manifest.
 Development PRs target `dev`. The workspace lives at the repository root; `main`
 remains the stable branch.
 
-The next milestone is a complete fake-provider turn: create a session, persist
-input, execute the provider loop, and persist the final response and events.
+The next milestone is tools and approvals: the registry, the five built-in
+tools, the approval policy and resolver, and tool batches.

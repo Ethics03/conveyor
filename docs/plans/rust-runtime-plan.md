@@ -1,9 +1,10 @@
 # Conveyor runtime: structure and implementation plan
 
-Status: milestone 1 (domain records and async storage) is implemented, as are
-the `conveyor-core` contracts (cancellation, providers with fake and Anthropic
-adapters, and tools) and the `conveyor-http` transport contract. The agent
-runtime, concrete tools, and the reqwest transport remain subsequent work.
+Status: milestones 1 (domain records and async storage) and 2 (a complete
+fake-provider turn) are implemented, as are the `conveyor-core` contracts
+(cancellation, providers with fake and Anthropic adapters, and tools) and the
+`conveyor-http` transport contract. Concrete tools, approvals, context planning,
+and the reqwest transport remain subsequent work.
 
 ## Product and scope
 
@@ -89,8 +90,9 @@ conveyor/
 └── examples/
 ```
 
-`conveyor-core`, `conveyor-http`, and `conveyor-storage` are implemented. The
-other crates are scaffolds documenting their boundaries. Add working behavior, integration
+`conveyor-core`, `conveyor-http`, `conveyor-storage`, `conveyor-agent`, and
+`conveyor-harness` are implemented. `conveyor-tools` and `conveyor-reqwest` are
+scaffolds documenting their boundaries. Add working behavior, integration
 suites, and runnable examples incrementally. Do not add placeholder passing tests
 or successful no-op implementations.
 
@@ -274,9 +276,12 @@ dependency compatibility or performance claims.
 1. **Complete: domain and durable state.** Typed records/errors, schema checks,
    async storage, atomic state/events, immutable approvals, versioned format
    fixtures, cancellation-safe completion, and explicit close.
-2. **Complete fake-provider turn.** Provider contract, fake provider, basic
+2. **Complete: fake-provider turn.** Provider contract, fake provider, basic
    context construction, runtime ownership, and a plain-response loop. Persist
    input, response, run outcomes, and events; verify reopening the session.
+   Each turn runs as a runtime-owned task, so sessions never wait on each other
+   and a dropped handle does not cancel its turn. Until tools exist, every
+   requested tool call is denied as unknown with a correlated result.
 3. **Tools and approvals.** Registry, five built-in tools, policy, async resolver,
    and initially sequential batches. Verify denied calls have no side effects.
 4. **Cancellation and parallel execution.** Bounded batches, barriers, ordered
