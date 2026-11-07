@@ -1,69 +1,113 @@
 # Conveyor
 
-A self-hosted runtime for persistent agents, implemented in Rust.
+A self-hosted, async-first runtime for multi-agent orchestration, written in Rust.
 
-The first runtime milestone is implemented: domain records and asynchronous
-SQLite storage for sessions, runs, messages, events, and approvals. The core
-contracts are also in place: cancellation tokens, the provider interface with
-fake and Anthropic adapters, and typed tool contracts. A complete turn runs
-end to end against the fake provider: `conveyor-harness` owns each turn as a
-background task with interruption and orderly shutdown. Concrete tools,
-approvals, the reqwest transport, and context planning remain subsequent steps.
-
-Storage uses an owned async worker that serializes accepted operations, finishes
-their transactions if callers stop waiting, and drains them on explicit close.
-The version 1 schema and serialized record formats are stable. Unknown schema
-versions and timestamps beyond the format's microsecond precision are rejected.
-Single-statement writes use implicit transactions; related state/event writes
-commit together in explicit transactions. Filtered event and approval queries use
-direct predicates so SQLite can use their existing session/run indexes.
-
-## Structure
-
-Conveyor is a Cargo workspace. The root `conveyor` crate re-exports the component
-crates; consumers can also depend on a component directly.
+Conveyor is built around one pattern: an **orchestrator agent** that stays with
+the user while **subagents** do long work in the background. The orchestrator
+hands off a task and gets control back right away. It keeps talking to the user,
+checks on running tasks, steers or cancels them, and picks up their results as
+they finish. The work the system can take on grows with the number of subagents,
+not with the length of one agent loop.
 
 ```text
-conveyor/
-├── Cargo.toml                  # workspace and public conveyor package
-├── Cargo.lock                  # shared resolved dependencies
-├── src/lib.rs                  # public re-exports
-├── crates/
-│   ├── conveyor-core/          # domain records, provider and tool contracts
-│   ├── conveyor-http/          # async HTTP transport contracts
-│   ├── conveyor-reqwest/       # reqwest transport implementation
-│   ├── conveyor-storage/      # async SQLite persistence
-│   ├── conveyor-tools/        # concrete tools and registry
-│   ├── conveyor-agent/        # turns, context, approvals, and tool orchestration
-│   └── conveyor-harness/      # session ownership, interruption, and shutdown
-├── test-support/fixtures/     # shared versioned SQL/JSON fixtures
-├── examples/
-└── docs/plans/rust-runtime-plan.md
+            user
+              │  stays reachable
+              ▼
+     ┌──────────────────┐   start · check · update · cancel · list
+     │   orchestrator   │ ─────────────────────────────────────────┐
+     └──────────────────┘                                          │
+              ▲  results and questions, delivered between model calls
+              │                                                    ▼
+     ┌────────┴─────────┬──────────────────┬──────────────────┐
+     │    subagent A    │    subagent B    │    subagent C    │  each in its own
+     │   (researcher)   │     (coder)      │    (reviewer)    │  session and task
+     └──────────────────┴──────────────────┴──────────────────┘
 ```
 
-`conveyor-core`, `conveyor-http`, `conveyor-storage`, `conveyor-agent` (run
-loop and provider messages), and `conveyor-harness` are implemented, with their
-tests inside each crate. `conveyor-tools` and `conveyor-reqwest` are scaffolds. Add
-implementations and dependencies as their migration steps arrive.
-`conveyor-http` defines transport contracts; `conveyor-reqwest` will implement
-them. Provider wire conversion belongs in `conveyor-core`, where the Anthropic
-adapter sits behind the `anthropic` feature.
+## Design
 
-Domain and storage APIs expose their own typed `Error` and `Result`. The facade
-re-exports the errors as `DomainError` and `StorageError`; it does not combine
-them into a shared error enum that would couple core consumers to SQLite.
+- **Nothing blocks the orchestrator.** Every agent turn runs as its own task owned
+  by the runtime, so starting a subagent returns at once and sessions never wait
+  on each other.
+- **Results come to the orchestrator.** A finished subagent reports back whether
+  the orchestrator is busy (the result arrives before its next model call), idle
+  (it is woken with a new turn), or waiting on an approval (the result waits too).
+- **Subagents can be steered.** An update either interrupts the subagent and
+  restarts it with the new instruction, or queues the instruction until the
+  current run finishes.
+- **Everything is durable.** Sessions, runs, messages, approvals, and an
+  append-only event log live in SQLite, so a restart recovers what was in flight.
+- **Cancellation is cooperative and complete.** Interrupting a turn stops a
+  provider call in flight, saves the cancelled outcome, and leaves the session
+  ready for the next turn.
+- **Built for throughput.** Many agents share one provider and one store. Tokio
+  tasks are cheap, so the limits that matter are provider rate limits and
+  database writes, and the design budgets for both.
 
-The dependency direction and implementation milestones are in the
-[runtime plan](docs/plans/rust-runtime-plan.md).
+## Status
+
+Conveyor is early. The foundation for the orchestrator is in place; the subagent
+tools are next after parity with the earlier Python implementation.
+
+| Area | Status |
+| --- | --- |
+| Durable sessions, runs, messages, events, and approvals (SQLite) | Done |
+| Provider contract, fake provider, Anthropic adapter | Done |
+| Agent run loop: provider calls, run outcomes, cancellation | Done |
+| Runtime: each turn as a background task, one turn per session, interrupt, shutdown | Done |
+| Built-in tools, approvals, and parallel tool execution | In progress |
+| Live HTTP transport, OpenAI adapter, context planning, session titles | Planned |
+| Subagent tools, result delivery, steering, and limits on depth, count, and budget | Planned |
+| Shared provider rate limiting and higher-throughput storage | Planned |
+
+## Example
+
+The runtime API today runs single-agent turns, each in the background:
+
+```rust
+use std::sync::Arc;
+
+use conveyor::{Store, core::providers::fake::FakeProvider, harness::Runtime, models::Agent};
+
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let store = Store::open("conveyor.sqlite").await?;
+    let runtime = Runtime::new(store, Arc::new(FakeProvider::new(["Done."])));
+    let session = runtime.create_session(Some("Release prep")).await?;
+
+    // The turn runs as its own task; this one is free to start others.
+    let turn = runtime
+        .start_turn(Agent::default(), &session.id, "Draft the release notes")
+        .await?;
+    let outcome = turn.outcome().await?;
+    println!("{:?}: {:?}", outcome.run.status, outcome.final_message);
+
+    runtime.close().await?;
+    Ok(())
+}
+```
+
+## Workspace
+
+The root `conveyor` crate re-exports the component crates; depend on a component
+directly when that is all you need.
+
+| Crate | Role |
+| --- | --- |
+| `conveyor-harness` | The runtime: sessions, background turns, interruption, shutdown |
+| `conveyor-agent` | The agent loop: provider calls, run state, tool batches, approvals |
+| `conveyor-tools` | Built-in tools and their registry |
+| `conveyor-storage` | Async SQLite persistence |
+| `conveyor-core` | Domain records, cancellation, provider and tool contracts, provider adapters |
+| `conveyor-http` | The HTTP transport contract providers send through |
+| `conveyor-reqwest` | The reqwest implementation of that transport |
+
+Crate boundaries, the storage and execution contracts, and the milestones are in
+the [runtime plan](docs/plans/rust-runtime-plan.md).
 
 ## Development
 
-Use fish. `rust-toolchain.toml` selects the tested Rust 1.99.1 compiler, rustfmt,
-and Clippy; resolved dependencies are committed in `Cargo.lock`.
-
-Runtime and I/O APIs are async. Pure record construction, validation, and encoding
-remain synchronous. The library exposes typed errors using `thiserror`;
-`anyhow` can provide reporting context at a future executable boundary.
+Use fish. `rust-toolchain.toml` pins the tested Rust 1.99.1 toolchain, and
+`Cargo.lock` is committed.
 
 ```fish
 cargo fmt --all --check
@@ -73,18 +117,5 @@ cargo test --workspace --locked --doc
 env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --locked --no-deps
 ```
 
-The test suite runs entirely in Rust without model credentials. It covers
-transaction rollback, approval conflicts, full-queue cancellation and draining,
-indexed query plans, shutdown, database reopen,
-and reading/updating versioned SQL/JSON fixtures while preserving timestamps,
-tool-call correlation, and opaque provider metadata.
-
-Root Cargo commands select every member by default; CI also selects the entire
-workspace explicitly. All members inherit the version, edition, compiler
-requirement, and publish setting from the root manifest.
-
-Development PRs target `dev`. The workspace lives at the repository root; `main`
-remains the stable branch.
-
-The next milestone is tools and approvals: the registry, the five built-in
-tools, the approval policy and resolver, and tool batches.
+The test suite needs no model credentials. Development PRs target `dev`; `main`
+is the stable branch.
