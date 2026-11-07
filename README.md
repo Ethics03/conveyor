@@ -1,13 +1,17 @@
 # Conveyor
 
-A self-hosted, async-first runtime for multi-agent orchestration, written in Rust.
+A self-hosted runtime for persistent agents, built async-first for multi-agent
+orchestration and written in Rust.
 
-Conveyor is built around one pattern: an **orchestrator agent** that stays with
-the user while **subagents** do long work in the background. The orchestrator
-hands off a task and gets control back right away. It keeps talking to the user,
-checks on running tasks, steers or cancels them, and picks up their results as
-they finish. The work the system can take on grows with the number of subagents,
-not with the length of one agent loop.
+Agents in Conveyor are persistent: their sessions, history, and work are stored
+durably, so an agent outlives any single process and picks up where it left off.
+
+On top of that, Conveyor is built around one pattern: an **orchestrator agent**
+that stays with the user while **subagents** do long work in the background. The
+orchestrator hands off a task and gets control back right away. It keeps talking
+to the user, checks on running tasks, steers or cancels them, and picks up their
+results as they finish. The work the system can take on grows with the number
+of subagents, not with the length of one agent loop.
 
 ```text
             user
@@ -35,8 +39,9 @@ not with the length of one agent loop.
 - **Subagents can be steered.** An update either interrupts the subagent and
   restarts it with the new instruction, or queues the instruction until the
   current run finishes.
-- **Everything is durable.** Sessions, runs, messages, approvals, and an
-  append-only event log live in SQLite, so a restart recovers what was in flight.
+- **Agents persist.** Sessions, runs, messages, approvals, and an append-only
+  event log live in SQLite. An agent's history and in-flight work outlast any
+  one process, and a restart recovers what was running.
 - **Cancellation is cooperative and complete.** Interrupting a turn stops a
   provider call in flight, saves the cancelled outcome, and leaves the session
   ready for the next turn.
@@ -58,6 +63,7 @@ tools are next after parity with the earlier Python implementation.
 | Built-in tools, approvals, and parallel tool execution | In progress |
 | Live HTTP transport, OpenAI adapter, context planning, session titles | Planned |
 | Subagent tools, result delivery, steering, and limits on depth, count, and budget | Planned |
+| Recovering in-flight work after a restart | Planned |
 | Shared provider rate limiting and higher-throughput storage | Planned |
 
 ## Example
