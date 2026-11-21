@@ -1,6 +1,6 @@
 //! One agent run: provider iterations, run transitions, and their persistence.
 
-use std::num::NonZeroU32;
+use std::{num::NonZeroU32, path::Path};
 
 use conveyor_core::{
     CancellationToken, Cancelled,
@@ -8,20 +8,39 @@ use conveyor_core::{
         Agent, Event, EventType, JsonObject, Message, MessageRole, Run, RunOutcome, RunStatus,
         Session, now,
     },
-    providers::{FinishReason, Provider, ProviderRequest, ProviderResponse, ReplayState},
+    providers::{
+        FinishReason, Provider, ProviderRequest, ProviderResponse, ReplayState, ToolDefinition,
+    },
+    tools::ToolContext,
 };
 use conveyor_storage::{Error as StorageError, Store};
+use conveyor_tools::{ToolRegistry, UnknownTools};
 use serde_json::{Value, json};
 
 use crate::{
     Error, Result,
     context::build_provider_messages,
     error::error_chain,
-    tool_batch::{deny_tool_call, save_cancelled_tool_results},
+    tool_batch::{
+        Decision, Toolbox, deny_tool_call, execute_tool_call, preflight,
+        save_cancelled_tool_results,
+    },
 };
 
 /// Provider iterations allowed per run unless configured otherwise.
 pub const DEFAULT_MAX_ITERATIONS: NonZeroU32 = NonZeroU32::new(20).unwrap();
+
+/// What a run without [`RunRequest::tools`] can call: nothing.
+static NO_TOOLS: ToolRegistry = ToolRegistry::new();
+
+/// The tools a run may call and the workspace they execute in.
+#[derive(Debug, Clone, Copy)]
+pub struct RunTools<'a> {
+    /// Every available tool; the agent's `tools` list selects from it.
+    pub registry: &'a ToolRegistry,
+    /// The directory workspace tools are confined to.
+    pub workspace: &'a Path,
+}
 
 /// Everything one run needs. Build it with [`RunRequest::new`].
 #[derive(Debug, Clone, Copy)]
@@ -31,6 +50,9 @@ pub struct RunRequest<'a> {
     pub provider: &'a dyn Provider,
     pub store: &'a Store,
     pub cancellation: &'a CancellationToken,
+    /// Tools for the run. Without them, the agent may name no tools and
+    /// every requested call is denied as unknown.
+    pub tools: Option<RunTools<'a>>,
     pub parent_run_id: Option<&'a str>,
     pub max_iterations: NonZeroU32,
 }
@@ -49,9 +71,19 @@ impl<'a> RunRequest<'a> {
             provider,
             store,
             cancellation,
+            tools: None,
             parent_run_id: None,
             max_iterations: DEFAULT_MAX_ITERATIONS,
         }
+    }
+
+    /// Let the run call tools from `registry`, executing them in `workspace`.
+    pub fn with_tools(mut self, registry: &'a ToolRegistry, workspace: &'a Path) -> Self {
+        self.tools = Some(RunTools {
+            registry,
+            workspace,
+        });
+        self
     }
 }
 
@@ -59,21 +91,32 @@ impl<'a> RunRequest<'a> {
 /// or is cancelled.
 ///
 /// The run and every message and event it produces are persisted as they
-/// happen. Cancellation is checked before and after each provider call and
-/// interrupts a call in flight; the outcome is then `cancelled`, with a
-/// cancelled result for each unanswered tool call. Incomplete provider
-/// responses and the iteration limit end the run as `failed`.
+/// happen. The model is offered the registry tools the agent lists. Each
+/// batch of requested calls is checked before any call runs: read tools run
+/// in the order requested, while unknown tools and tools that need approval
+/// get a denial, since approvals are not supported yet. Every call gets a
+/// result correlated to it, and failed tools are reported to the model
+/// rather than ending the run.
 ///
-/// Returns an error without creating a run when the agent names unavailable
-/// tools or the session has no messages. Provider and storage failures after
-/// the run starts are recorded on the run, then returned.
+/// Cancellation is checked before and after each provider call and before
+/// each tool call, and it interrupts a provider or tool call in flight; the
+/// outcome is then `cancelled`, with a cancelled result for each unanswered
+/// tool call. A tool that finishes as cancellation arrives keeps its result.
+/// Incomplete provider responses and the iteration limit end the run as
+/// `failed`.
+///
+/// Returns an error without creating a run when the agent names tools that
+/// are not available or the session has no messages. Provider and storage
+/// failures after the run starts are recorded on the run, then returned.
 pub async fn run_agent(request: RunRequest<'_>) -> Result<RunOutcome> {
-    if !request.agent.tools.is_empty() {
-        let mut names = request.agent.tools.clone();
-        names.sort();
-        names.dedup();
-        return Err(Error::UnknownTools(names));
-    }
+    let registry = request.tools.map_or(&NO_TOOLS, |tools| tools.registry);
+    let allowed = registry
+        .subset(&request.agent.tools)
+        .map_err(|UnknownTools(names)| Error::UnknownTools(names))?;
+    let toolbox = request.tools.map(|tools| Toolbox {
+        registry: allowed,
+        context: ToolContext::new(tools.workspace, request.cancellation.clone()),
+    });
     let mut transcript = request.store.list_messages(&request.session.id).await?;
     if transcript.is_empty() {
         return Err(Error::EmptyTranscript);
@@ -91,7 +134,7 @@ pub async fn run_agent(request: RunRequest<'_>) -> Result<RunOutcome> {
         final_message: None,
         iterations: 0,
     };
-    match iterate(&request, &mut progress, &mut transcript).await {
+    match iterate(&request, toolbox.as_ref(), &mut progress, &mut transcript).await {
         Ok(None) => finish(request.store, progress).await,
         Ok(Some(error)) => fail(request.store, progress, error).await,
         Err(Stop::Cancelled(cancelled)) => cancel(request.store, progress, cancelled).await,
@@ -109,7 +152,8 @@ struct Progress {
     iterations: u32,
 }
 
-enum Stop {
+/// Why a run stopped before reaching an outcome of its own.
+pub(crate) enum Stop {
     Cancelled(Cancelled),
     Failed(Error),
 }
@@ -135,14 +179,16 @@ impl From<StorageError> for Stop {
 /// Returns `Some(reason)` when the run should end as failed.
 async fn iterate(
     request: &RunRequest<'_>,
+    toolbox: Option<&Toolbox>,
     progress: &mut Progress,
     transcript: &mut Vec<Message>,
 ) -> std::result::Result<Option<String>, Stop> {
     let cancellation = request.cancellation;
+    let definitions = toolbox.map_or_else(Vec::new, |toolbox| toolbox.registry.definitions());
     for iteration in 1..=request.max_iterations.get() {
         progress.iterations = iteration;
         cancellation.check()?;
-        let provider_request = provider_request(request, &progress.run, transcript)?;
+        let provider_request = provider_request(request, &definitions, &progress.run, transcript)?;
         let response = tokio::select! {
             biased;
             cancelled = cancellation.cancelled() => return Err(cancelled.into()),
@@ -164,12 +210,19 @@ async fn iterate(
         if assistant.tool_calls.is_empty() {
             return Ok(None);
         }
-        // No tools are registered yet, so every call is denied as unknown.
-        for call in &assistant.tool_calls {
+        // Decide every call in the batch before any of them runs.
+        let decisions = preflight(toolbox, &assistant.tool_calls);
+        for (call, decision) in assistant.tool_calls.iter().zip(decisions) {
             cancellation.check()?;
-            let reason = format!("Unknown tool: {}", call.name);
-            let denial = deny_tool_call(request.store, &progress.run, call, &reason).await?;
-            transcript.push(denial);
+            let result = match decision {
+                Decision::Run(toolbox) => {
+                    execute_tool_call(request.store, &progress.run, toolbox, call).await?
+                }
+                Decision::Deny(reason) => {
+                    deny_tool_call(request.store, &progress.run, call, &reason).await?
+                }
+            };
+            transcript.push(result);
         }
     }
     Ok(Some(format!(
@@ -180,6 +233,7 @@ async fn iterate(
 
 fn provider_request(
     request: &RunRequest<'_>,
+    tools: &[ToolDefinition],
     run: &Run,
     transcript: &[Message],
 ) -> Result<ProviderRequest> {
@@ -189,6 +243,7 @@ fn provider_request(
         .provider
         .model_limits(request.agent.model.as_deref());
     let mut provider_request = ProviderRequest::new(messages);
+    provider_request.tools = tools.to_vec();
     provider_request.model = request.agent.model.clone();
     provider_request.max_tokens = Some(limits.max_output_tokens());
     Ok(provider_request)

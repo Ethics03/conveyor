@@ -2,6 +2,7 @@
 
 use std::{
     collections::HashMap,
+    path::PathBuf,
     pin::pin,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
@@ -13,6 +14,7 @@ use conveyor_core::{
     providers::Provider,
 };
 use conveyor_storage::Store;
+use conveyor_tools::{ToolRegistry, UnknownTools};
 use tokio::sync::{Notify, oneshot};
 
 use crate::{Error, Result};
@@ -20,7 +22,7 @@ use crate::{Error, Result};
 /// The cancellation reason given to turns still running at shutdown.
 pub const RUNTIME_SHUTDOWN_REASON: &str = "Runtime is shutting down";
 
-/// Owns the store and provider, and every turn running on them.
+/// Owns the store, provider, and tools, and every turn running on them.
 ///
 /// Each turn runs as its own task, so callers and other sessions never wait
 /// on it. A session has at most one active turn. [`close`](Self::close) stops
@@ -35,8 +37,15 @@ pub struct Runtime {
 struct Shared {
     store: Store,
     provider: Arc<dyn Provider>,
+    tools: Option<Tools>,
     turns: Mutex<Turns>,
     idle: Notify,
+}
+
+#[derive(Debug)]
+struct Tools {
+    registry: ToolRegistry,
+    workspace: PathBuf,
 }
 
 #[derive(Debug, Default)]
@@ -46,11 +55,32 @@ struct Turns {
 }
 
 impl Runtime {
+    /// A runtime whose agents can call no tools.
     pub fn new(store: Store, provider: Arc<dyn Provider>) -> Self {
+        Self::build(store, provider, None)
+    }
+
+    /// A runtime whose agents can call the `registry` tools they list,
+    /// executing them in `workspace`.
+    pub fn with_tools(
+        store: Store,
+        provider: Arc<dyn Provider>,
+        registry: ToolRegistry,
+        workspace: impl Into<PathBuf>,
+    ) -> Self {
+        let tools = Tools {
+            registry,
+            workspace: workspace.into(),
+        };
+        Self::build(store, provider, Some(tools))
+    }
+
+    fn build(store: Store, provider: Arc<dyn Provider>, tools: Option<Tools>) -> Self {
         Self {
             shared: Arc::new(Shared {
                 store,
                 provider,
+                tools,
                 turns: Mutex::default(),
                 idle: Notify::new(),
             }),
@@ -76,8 +106,9 @@ impl Runtime {
     ///
     /// The returned handle reports the outcome; dropping it leaves the turn
     /// running. Fails without saving anything when the runtime is closed, the
-    /// content is blank, the session is missing or archived, or the session
-    /// already has an active turn.
+    /// content is blank, the agent lists tools the runtime does not have, the
+    /// session is missing or archived, or the session already has an active
+    /// turn.
     pub async fn start_turn(
         &self,
         agent: Agent,
@@ -89,6 +120,7 @@ impl Runtime {
         if content.trim().is_empty() {
             return Err(Error::EmptyContent);
         }
+        self.check_tools(&agent)?;
         let session = self
             .shared
             .store
@@ -114,14 +146,17 @@ impl Runtime {
         let shared = Arc::clone(&self.shared);
         let session_id = session.id.clone();
         tokio::spawn(async move {
-            let outcome = run_agent(RunRequest::new(
+            let mut request = RunRequest::new(
                 &agent,
                 &session,
                 shared.provider.as_ref(),
                 &shared.store,
                 &guard.cancellation,
-            ))
-            .await;
+            );
+            if let Some(tools) = &shared.tools {
+                request = request.with_tools(&tools.registry, &tools.workspace);
+            }
+            let outcome = run_agent(request).await;
             // Release the session before reporting, so the caller can start
             // the next turn as soon as it sees this outcome.
             drop(guard);
@@ -191,6 +226,17 @@ impl Runtime {
         }
         self.shared.store.close().await?;
         Ok(())
+    }
+
+    fn check_tools(&self, agent: &Agent) -> Result<()> {
+        let registry = match &self.shared.tools {
+            Some(tools) => &tools.registry,
+            None => &ToolRegistry::new(),
+        };
+        match registry.subset(&agent.tools) {
+            Ok(_) => Ok(()),
+            Err(UnknownTools(names)) => Err(AgentError::UnknownTools(names).into()),
+        }
     }
 
     fn ensure_open(&self) -> Result<()> {

@@ -3,8 +3,10 @@
 Status: milestones 1 (domain records and async storage) and 2 (a complete
 fake-provider turn) are implemented, as are the `conveyor-core` contracts
 (cancellation, providers with fake and Anthropic adapters, and tools) and the
-`conveyor-http` transport contract. Concrete tools, approvals, context planning,
-and the reqwest transport remain subsequent work.
+`conveyor-http` transport contract. Milestone 3 is in progress: the tool
+registry and sequential dispatch in the run loop are implemented. Concrete
+tools, approvals, context planning, and the reqwest transport remain
+subsequent work.
 
 ## Product and scope
 
@@ -91,8 +93,9 @@ conveyor/
 ```
 
 `conveyor-core`, `conveyor-http`, `conveyor-storage`, `conveyor-agent`, and
-`conveyor-harness` are implemented. `conveyor-tools` and `conveyor-reqwest` are
-scaffolds documenting their boundaries. Add working behavior, integration
+`conveyor-harness` are implemented. `conveyor-tools` implements the registry;
+its workspace, shell, and process modules and `conveyor-reqwest` are scaffolds
+documenting their boundaries. Add working behavior, integration
 suites, and runnable examples incrementally. Do not add placeholder passing tests
 or successful no-op implementations.
 
@@ -280,10 +283,14 @@ dependency compatibility or performance claims.
    context construction, runtime ownership, and a plain-response loop. Persist
    input, response, run outcomes, and events; verify reopening the session.
    Each turn runs as a runtime-owned task, so sessions never wait on each other
-   and a dropped handle does not cancel its turn. Until tools exist, every
-   requested tool call is denied as unknown with a correlated result.
+   and a dropped handle does not cancel its turn.
 3. **Tools and approvals.** Registry, five built-in tools, policy, async resolver,
    and initially sequential batches. Verify denied calls have no side effects.
+   Done so far: the registry, agent allowlists, and sequential dispatch. A run
+   advertises its agent's tools, decides the whole batch before any call runs,
+   executes read tools, and saves a correlated result for every call. Write and
+   dangerous tools are denied until the approval resolver exists; a tool that
+   finishes as cancellation arrives keeps its result.
 4. **Cancellation and parallel execution.** Bounded batches, barriers, ordered
    results, interruption at every wait point, process cleanup, and shutdown.
 5. **Context and live provider.** Budgets, result clearing, compaction telemetry

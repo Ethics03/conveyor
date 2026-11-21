@@ -9,4 +9,4 @@ mod tool_batch;
 
 pub use context::build_provider_messages;
 pub use error::{Error, Result};
-pub use run::{DEFAULT_MAX_ITERATIONS, RunRequest, run_agent};
+pub use run::{DEFAULT_MAX_ITERATIONS, RunRequest, RunTools, run_agent};

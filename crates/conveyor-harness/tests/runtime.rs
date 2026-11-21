@@ -5,15 +5,22 @@ use std::{
     time::Duration,
 };
 
+use conveyor_agent::Error as AgentError;
 use conveyor_core::{
     BoxFuture, Error as DomainError,
-    models::{Agent, EventType, MessageRole, RunStatus, Session, SessionStatus},
-    providers::{
-        ModelLimits, Provider, ProviderError, ProviderRequest, ProviderResponse, fake::FakeProvider,
+    models::{
+        Agent, EventType, JsonObject, MessageRole, RunStatus, Session, SessionStatus, ToolCall,
+        ToolPermission,
     },
+    providers::{
+        ModelLimits, Provider, ProviderError, ProviderRequest, ProviderResponse, ToolDefinition,
+        fake::FakeProvider,
+    },
+    tools::{DynTool, ToolContext, ToolError, ToolOutput},
 };
 use conveyor_harness::{Error, RUNTIME_SHUTDOWN_REASON, Runtime};
 use conveyor_storage::{Error as StorageError, Store};
+use conveyor_tools::ToolRegistry;
 use tokio::{
     sync::{Barrier, Notify},
     time::timeout,
@@ -23,6 +30,38 @@ const WAIT: Duration = Duration::from_secs(5);
 
 async fn memory_runtime(provider: Arc<dyn Provider>) -> Runtime {
     Runtime::new(Store::open(":memory:").await.unwrap(), provider)
+}
+
+/// A read tool that reports the workspace it ran in.
+struct Workspace;
+
+impl DynTool for Workspace {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new("workspace", "Show the workspace", JsonObject::new())
+    }
+
+    fn permission(&self) -> ToolPermission {
+        ToolPermission::Read
+    }
+
+    fn parallel_safe(&self) -> bool {
+        true
+    }
+
+    fn execute<'a>(
+        &'a self,
+        _arguments: JsonObject,
+        context: &'a ToolContext,
+    ) -> BoxFuture<'a, Result<ToolOutput, ToolError>> {
+        Box::pin(async move { Ok(context.workspace().display().to_string().into()) })
+    }
+}
+
+fn agent_with_tools(tools: &[&str]) -> Agent {
+    Agent {
+        tools: tools.iter().map(|name| (*name).to_owned()).collect(),
+        ..Agent::default()
+    }
 }
 
 /// Answers each request from a script; `None` waits until the request is dropped.
@@ -364,4 +403,83 @@ async fn turns_require_content_and_an_active_session() {
             .is_empty()
     );
     runtime.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn turns_call_the_runtime_tools_in_its_workspace() {
+    let call = ToolCall::new("workspace", JsonObject::new());
+    let provider = Arc::new(FakeProvider::new([
+        ProviderResponse::tool_call(call.clone()),
+        ProviderResponse::message("Done."),
+    ]));
+    let registry = ToolRegistry::new().with(Workspace).unwrap();
+    let runtime = Runtime::with_tools(
+        Store::open(":memory:").await.unwrap(),
+        provider.clone(),
+        registry,
+        "/srv/project",
+    );
+    let session = runtime.create_session(None).await.unwrap();
+
+    let outcome = runtime
+        .run_turn(
+            agent_with_tools(&["workspace"]),
+            &session.id,
+            "Where are you?",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    assert_eq!(provider.requests()[0].tools[0].name, "workspace");
+    let messages = runtime.store().list_messages(&session.id).await.unwrap();
+    let result = messages
+        .iter()
+        .find(|message| message.role == MessageRole::Tool)
+        .unwrap();
+    assert_eq!(result.tool_call_id.as_deref(), Some(call.id.as_str()));
+    assert_eq!(result.content, "/srv/project");
+    runtime.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn turns_reject_agents_that_list_unavailable_tools_before_saving() {
+    let without_tools = memory_runtime(Arc::new(FakeProvider::default())).await;
+    let session = without_tools.create_session(None).await.unwrap();
+    let error = without_tools
+        .start_turn(agent_with_tools(&["workspace"]), &session.id, "Hello")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Agent(AgentError::UnknownTools(names)) if names == &["workspace"])
+    );
+    assert!(
+        without_tools
+            .store()
+            .list_messages(&session.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    without_tools.close().await.unwrap();
+
+    let registry = ToolRegistry::new().with(Workspace).unwrap();
+    let with_tools = Runtime::with_tools(
+        Store::open(":memory:").await.unwrap(),
+        Arc::new(FakeProvider::default()),
+        registry,
+        ".",
+    );
+    let session = with_tools.create_session(None).await.unwrap();
+    let error = with_tools
+        .start_turn(
+            agent_with_tools(&["workspace", "bash"]),
+            &session.id,
+            "Hello",
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(&error, Error::Agent(AgentError::UnknownTools(names)) if names == &["bash"]));
+    assert!(!with_tools.is_active(&session.id));
+    with_tools.close().await.unwrap();
 }
