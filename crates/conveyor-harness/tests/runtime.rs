@@ -20,7 +20,7 @@ use conveyor_core::{
 };
 use conveyor_harness::{Error, RUNTIME_SHUTDOWN_REASON, Runtime};
 use conveyor_storage::{Error as StorageError, Store};
-use conveyor_tools::ToolRegistry;
+use conveyor_tools::{ToolRegistry, default_registry};
 use tokio::{
     sync::{Barrier, Notify},
     time::timeout,
@@ -482,4 +482,47 @@ async fn turns_reject_agents_that_list_unavailable_tools_before_saving() {
     assert!(matches!(&error, Error::Agent(AgentError::UnknownTools(names)) if names == &["bash"]));
     assert!(!with_tools.is_active(&session.id));
     with_tools.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn turns_read_workspace_files_with_the_built_in_tools() {
+    let workspace = tempfile::TempDir::new().unwrap();
+    std::fs::write(workspace.path().join("notes.txt"), "ship on friday\n").unwrap();
+    let mut arguments = JsonObject::new();
+    arguments.insert("path".into(), "notes.txt".into());
+    let call = ToolCall::new("read_file", arguments);
+    let provider = Arc::new(FakeProvider::new([
+        ProviderResponse::tool_call(call.clone()),
+        ProviderResponse::message("Friday."),
+    ]));
+    let runtime = Runtime::with_tools(
+        Store::open(":memory:").await.unwrap(),
+        provider.clone(),
+        default_registry(),
+        workspace.path(),
+    );
+    let session = runtime.create_session(None).await.unwrap();
+
+    let outcome = runtime
+        .run_turn(
+            agent_with_tools(&["read_file"]),
+            &session.id,
+            "When do we ship?",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    let messages = runtime.store().list_messages(&session.id).await.unwrap();
+    let result = messages
+        .iter()
+        .find(|message| message.role == MessageRole::Tool)
+        .unwrap();
+    assert_eq!(result.metadata["ok"], true);
+    assert!(
+        result.content.contains(r#""content":"1|ship on friday""#),
+        "{}",
+        result.content
+    );
+    runtime.close().await.unwrap();
 }
