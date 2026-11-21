@@ -10,9 +10,11 @@ description = "Agent turns, context construction, and approval orchestration for
 chrono.workspace = true
 conveyor-core.workspace = true
 conveyor-storage.workspace = true
+conveyor-tools.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros"] }
 
 [dev-dependencies]
+serde.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

@@ -115,6 +115,8 @@ dependencies = [
  "chrono",
  "conveyor-core",
  "conveyor-storage",
+ "conveyor-tools",
+ "serde",
  "serde_json",
  "thiserror",
  "tokio",
@@ -140,6 +142,7 @@ dependencies = [
  "conveyor-agent",
  "conveyor-core",
  "conveyor-storage",
+ "conveyor-tools",
  "tempfile",
  "thiserror",
  "tokio",
@@ -175,6 +178,13 @@ dependencies = [
 [[package]]
 name = "conveyor-tools"
 version = "0.1.0"
+dependencies = [
+ "conveyor-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "core-foundation-sys"
