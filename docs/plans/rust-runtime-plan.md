@@ -4,8 +4,9 @@ Status: milestones 1 (domain records and async storage) and 2 (a complete
 fake-provider turn) are implemented, as are the `conveyor-core` contracts
 (cancellation, providers with fake and Anthropic adapters, and tools) and the
 `conveyor-http` transport contract. Milestone 3 is in progress: the tool
-registry and sequential dispatch in the run loop are implemented. Concrete
-tools, approvals, context planning, and the reqwest transport remain
+registry, sequential dispatch in the run loop, and the read-only tools
+(`read_file`, `read_many`, `search_files`) are implemented. Approvals, the
+write and shell tools, context planning, and the reqwest transport remain
 subsequent work.
 
 ## Product and scope
@@ -93,9 +94,10 @@ conveyor/
 ```
 
 `conveyor-core`, `conveyor-http`, `conveyor-storage`, `conveyor-agent`, and
-`conveyor-harness` are implemented. `conveyor-tools` implements the registry;
-its workspace, shell, and process modules and `conveyor-reqwest` are scaffolds
-documenting their boundaries. Add working behavior, integration
+`conveyor-harness` are implemented. `conveyor-tools` implements the registry,
+workspace path containment, the read-only tools, and bounded process output
+collection; its shell module and `conveyor-reqwest` are scaffolds documenting
+their boundaries. Add working behavior, integration
 suites, and runnable examples incrementally. Do not add placeholder passing tests
 or successful no-op implementations.
 
@@ -290,7 +292,10 @@ dependency compatibility or performance claims.
    advertises its agent's tools, decides the whole batch before any call runs,
    executes read tools, and saves a correlated result for every call. Write and
    dangerous tools are denied until the approval resolver exists; a tool that
-   finishes as cancellation arrives keeps its result.
+   finishes as cancellation arrives keeps its result. `read_file`, `read_many`,
+   and `search_files` are implemented with workspace containment that follows
+   symbolic links, including dangling ones; `search_files` runs ripgrep, which
+   must be installed.
 4. **Cancellation and parallel execution.** Bounded batches, barriers, ordered
    results, interruption at every wait point, process cleanup, and shutdown.
 5. **Context and live provider.** Budgets, result clearing, compaction telemetry
