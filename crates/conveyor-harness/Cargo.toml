@@ -10,6 +10,7 @@ description = "Session ownership, interruption, and shutdown for Conveyor"
 conveyor-agent.workspace = true
 conveyor-core.workspace = true
 conveyor-storage.workspace = true
+conveyor-tools.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
 

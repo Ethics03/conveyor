@@ -1,15 +1,102 @@
-//! Persistence of tool-call results that a run produces without executing tools.
+//! Tool-call decisions, execution, and the persistence of their results.
 
 use std::collections::HashSet;
 
-use conveyor_core::models::{EventType, Message, MessageRole, Run, ToolCall};
+use conveyor_core::{
+    models::{EventType, Message, MessageRole, Run, ToolCall, ToolPermission},
+    tools::ToolContext,
+};
 use conveyor_storage::Store;
+use conveyor_tools::ToolRegistry;
 use serde_json::json;
 
 use crate::{
     Result,
-    run::{event, payload},
+    run::{Stop, event, payload},
 };
+
+/// The content of a denial for a tool that needs approval.
+pub(crate) const NO_APPROVAL_RESOLVER: &str =
+    "Tool call denied because no approval resolver is configured";
+
+/// The tools one run may call, and the context they execute with.
+pub(crate) struct Toolbox {
+    /// The registry restricted to the agent's tools.
+    pub(crate) registry: ToolRegistry,
+    pub(crate) context: ToolContext,
+}
+
+/// What happens to one requested call.
+pub(crate) enum Decision<'t> {
+    Run(&'t Toolbox),
+    Deny(String),
+}
+
+/// Decide every call in a batch before any of them runs.
+///
+/// Calls to tools outside the run's toolbox are denied as unknown. Read tools
+/// run; write and dangerous tools need an approval, and with no way to ask
+/// for one yet, they are denied.
+pub(crate) fn preflight<'t>(toolbox: Option<&'t Toolbox>, calls: &[ToolCall]) -> Vec<Decision<'t>> {
+    calls
+        .iter()
+        .map(|call| {
+            let permission = toolbox
+                .and_then(|toolbox| Some((toolbox, toolbox.registry.permission(&call.name)?)));
+            match permission {
+                None => Decision::Deny(format!("Unknown tool: {}", call.name)),
+                Some((toolbox, ToolPermission::Read)) => Decision::Run(toolbox),
+                Some((_, ToolPermission::Write | ToolPermission::Dangerous)) => {
+                    Decision::Deny(NO_APPROVAL_RESOLVER.into())
+                }
+            }
+        })
+        .collect()
+}
+
+/// Execute one allowed call and save its result.
+///
+/// A result that is ready when cancellation arrives is saved as finished;
+/// otherwise cancellation stops the call and is returned, leaving the
+/// cancelled result to the run's cancellation path.
+pub(crate) async fn execute_tool_call(
+    store: &Store,
+    run: &Run,
+    toolbox: &Toolbox,
+    call: &ToolCall,
+) -> std::result::Result<Message, Stop> {
+    let mut started = event(EventType::ToolStarted, run);
+    started.payload = payload(json!({
+        "tool_call_id": call.id,
+        "name": call.name,
+        "arguments": call.arguments,
+    }));
+    store.append_event(&started).await?;
+
+    let result = tokio::select! {
+        biased;
+        result = toolbox.registry.execute(call, &toolbox.context) => result?,
+        cancelled = toolbox.context.cancellation().cancelled() => return Err(cancelled.into()),
+    };
+
+    let mut message = tool_message(run, call, &result.content);
+    message.metadata = result.metadata;
+    message.metadata.insert("ok".into(), result.ok.into());
+    let mut created = event(EventType::MessageCreated, run);
+    created.message_id = Some(message.id.clone());
+    created.payload = payload(json!({"role": "tool", "name": call.name, "ok": result.ok}));
+    let mut finished = event(EventType::ToolFinished, run);
+    finished.message_id = Some(message.id.clone());
+    finished.payload = payload(json!({
+        "tool_call_id": call.id,
+        "name": call.name,
+        "ok": result.ok,
+    }));
+    store
+        .save_message_with_events(&message, &[created, finished])
+        .await?;
+    Ok(message)
+}
 
 /// Save a policy denial as the call's correlated tool result.
 pub(crate) async fn deny_tool_call(

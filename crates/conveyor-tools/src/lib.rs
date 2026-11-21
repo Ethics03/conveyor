@@ -4,3 +4,5 @@ mod process;
 mod registry;
 mod shell;
 mod workspace;
+
+pub use registry::{DuplicateTool, ToolRegistry, UnknownTools};
