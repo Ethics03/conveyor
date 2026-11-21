@@ -9,7 +9,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use conveyor_core::{Cancelled, tools::ToolContext};
+use conveyor_core::{CancellationToken, Cancelled, tools::ToolContext};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -169,15 +169,17 @@ fn real_path(path: &Path) -> io::Result<PathBuf> {
 
 /// Run blocking file system work for a tool call off the async workers.
 ///
-/// Cancellation returns at once; the work runs to its end on its thread, so it
-/// must be bounded. A result that is ready when cancellation arrives wins.
+/// Cancellation returns at once. The work gets the call's cancellation token
+/// and should stop at its next check, since its thread runs on until it
+/// returns. A result that is ready when cancellation arrives wins.
 pub(crate) async fn blocking<T, F>(context: &ToolContext, work: F) -> Result<T, WorkspaceError>
 where
     T: Send + 'static,
-    F: FnOnce(&Path) -> Result<T, WorkspaceError> + Send + 'static,
+    F: FnOnce(&Path, &CancellationToken) -> Result<T, WorkspaceError> + Send + 'static,
 {
     let workspace = context.workspace().to_path_buf();
-    let task = tokio::task::spawn_blocking(move || work(&workspace));
+    let cancellation = context.cancellation().clone();
+    let task = tokio::task::spawn_blocking(move || work(&workspace, &cancellation));
     tokio::select! {
         biased;
         joined = task => joined.map_err(|_| WorkspaceError::Stopped)?,

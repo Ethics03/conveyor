@@ -7,6 +7,7 @@ use std::{
 };
 
 use conveyor_core::{
+    CancellationToken,
     models::{JsonObject, ToolPermission},
     tools::{Tool, ToolContext, ToolError},
 };
@@ -24,7 +25,7 @@ const MAX_READ_MANY_FILES: usize = 20;
 const DEFAULT_READ_MANY_TOTAL_CHARS: i64 = 100_000;
 const MAX_READ_MANY_TOTAL_CHARS: usize = 250_000;
 const LINE_TRUNCATION_MARKER: &str = " ... [truncated]";
-const READ_CHUNK_BYTES: usize = 8_192;
+const READ_CHUNK_BYTES: usize = 64 * 1024;
 
 fn default_offset() -> i64 {
     DEFAULT_READ_OFFSET
@@ -94,9 +95,10 @@ impl Tool for ReadFile {
         args: ReadFileArgs,
         context: &ToolContext,
     ) -> Result<Value, WorkspaceError> {
-        let page = blocking(context, move |workspace| {
+        let page = blocking(context, move |workspace, cancellation| {
             read_text_file(
                 workspace,
+                cancellation,
                 &args.path,
                 args.offset,
                 args.limit,
@@ -168,7 +170,10 @@ impl Tool for ReadMany {
         args: ReadManyArgs,
         context: &ToolContext,
     ) -> Result<Value, WorkspaceError> {
-        let batch = blocking(context, move |workspace| Ok(read_many(workspace, &args))).await?;
+        let batch = blocking(context, move |workspace, cancellation| {
+            read_many(workspace, cancellation, &args)
+        })
+        .await?;
         super::json(&batch)
     }
 }
@@ -222,7 +227,11 @@ struct FileError {
     error: String,
 }
 
-fn read_many(workspace: &Path, args: &ReadManyArgs) -> ManyFiles {
+fn read_many(
+    workspace: &Path,
+    cancellation: &CancellationToken,
+    args: &ReadManyArgs,
+) -> Result<ManyFiles, WorkspaceError> {
     let selected = &args.paths[..args.paths.len().min(MAX_READ_MANY_FILES)];
     let char_limit = clamp(args.max_total_chars, 1, MAX_READ_MANY_TOTAL_CHARS);
     let mut files = Vec::new();
@@ -235,12 +244,20 @@ fn read_many(workspace: &Path, args: &ReadManyArgs) -> ManyFiles {
         if remaining == 0 {
             break;
         }
-        match read_text_file(workspace, path, args.offset, args.limit, remaining) {
+        match read_text_file(
+            workspace,
+            cancellation,
+            path,
+            args.offset,
+            args.limit,
+            remaining,
+        ) {
             Ok(page) => {
                 budget_truncated |= page.truncated;
                 total_chars += page.content.chars().count();
                 files.push(page);
             }
+            Err(WorkspaceError::Cancelled(cancelled)) => return Err(cancelled.into()),
             Err(error) => errors.push(FileError {
                 path: path.clone(),
                 error: error.to_string(),
@@ -252,7 +269,7 @@ fn read_many(workspace: &Path, args: &ReadManyArgs) -> ManyFiles {
     }
 
     let processed_count = files.len() + errors.len();
-    ManyFiles {
+    Ok(ManyFiles {
         truncated: budget_truncated
             || args.paths.len() > selected.len()
             || processed_count < selected.len(),
@@ -262,16 +279,18 @@ fn read_many(workspace: &Path, args: &ReadManyArgs) -> ManyFiles {
         processed_count,
         total_chars,
         max_total_chars: char_limit,
-    }
+    })
 }
 
 /// Read one page of numbered lines from `path`, within `max_chars` characters.
 ///
 /// Lines longer than [`MAX_READ_LINE_CHARS`] are clipped with a marker. One
 /// line past the page is looked at, so `total_lines` is exact only when the
-/// end of the file was reached.
+/// end of the file was reached. Lines before the page are scanned without
+/// being kept, and cancellation is noticed between chunks of the file.
 fn read_text_file(
     workspace: &Path,
+    cancellation: &CancellationToken,
     path: &str,
     offset: i64,
     limit: i64,
@@ -283,10 +302,15 @@ fn read_text_file(
         return Err(WorkspaceError::NotAFile(path.to_owned()));
     }
     let file = File::open(&resolved.path).map_err(|source| WorkspaceError::io(path, source))?;
-    let mut lines = Lines::new(file);
-    let failed = |error: io::Error| match error.kind() {
-        io::ErrorKind::InvalidData => WorkspaceError::NotText(path.to_owned()),
-        _ => WorkspaceError::io(path, error),
+    let mut lines = Lines::new(file, cancellation.clone());
+    let failed = |error: io::Error| {
+        if let Err(cancelled) = cancellation.check() {
+            return WorkspaceError::Cancelled(cancelled);
+        }
+        match error.kind() {
+            io::ErrorKind::InvalidData => WorkspaceError::NotText(path.to_owned()),
+            _ => WorkspaceError::io(path, error),
+        }
     };
 
     let page_offset = clamp(offset, 1, usize::MAX);
@@ -297,7 +321,6 @@ fn read_text_file(
     let mut content = String::new();
     let mut content_chars = 0;
     let mut content_lines = 0;
-    let mut total_lines = 0;
     let mut total_lines_is_exact = false;
     let mut char_truncated = false;
     let mut line_truncated = false;
@@ -305,6 +328,10 @@ fn read_text_file(
     let mut next_offset = None;
 
     let mut line_number = 0;
+    while line_number + 1 < page_offset && lines.skip_line().map_err(failed)? {
+        line_number += 1;
+    }
+    let mut total_lines = line_number;
     loop {
         let Some((line, clipped)) = lines.next_line().map_err(failed)? else {
             total_lines_is_exact = true;
@@ -312,9 +339,6 @@ fn read_text_file(
         };
         line_number += 1;
         total_lines = line_number;
-        if line_number < page_offset {
-            continue;
-        }
 
         let numbered = format!("{line_number}|{line}");
         let numbered_chars = numbered.chars().count();
@@ -396,18 +420,20 @@ fn read_text_file(
 /// characters, decoded in bounded chunks so a long line is never held whole.
 ///
 /// Lines end at `\n`; a `\r` before it is dropped. Invalid UTF-8 anywhere in
-/// the stream, including in a clipped part of a line, is an `InvalidData`
-/// error.
+/// the stream, including in a clipped or skipped part, is an `InvalidData`
+/// error. Once `cancellation` is requested, the next chunk is not read.
 struct Lines<R> {
     decoder: Utf8Chunks<R>,
+    cancellation: CancellationToken,
     chunk: String,
     position: usize,
 }
 
 impl<R: Read> Lines<R> {
-    fn new(reader: R) -> Self {
+    fn new(reader: R, cancellation: CancellationToken) -> Self {
         Self {
             decoder: Utf8Chunks::new(reader),
+            cancellation,
             chunk: String::new(),
             position: 0,
         }
@@ -421,12 +447,29 @@ impl<R: Read> Lines<R> {
     /// Load the next chunk if the current one is used up; false at the end.
     fn fill(&mut self) -> io::Result<bool> {
         while self.position >= self.chunk.len() {
-            match self.decoder.next_chunk()? {
-                Some(chunk) => {
-                    self.chunk = chunk;
-                    self.position = 0;
+            if self.cancellation.is_cancelled() {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            }
+            if !self.decoder.next_chunk(&mut self.chunk)? {
+                return Ok(false);
+            }
+            self.position = 0;
+        }
+        Ok(true)
+    }
+
+    /// Move past the next line without keeping it; false at the end.
+    fn skip_line(&mut self) -> io::Result<bool> {
+        if !self.fill()? {
+            return Ok(false);
+        }
+        while self.fill()? {
+            match self.chunk[self.position..].find('\n') {
+                Some(end) => {
+                    self.position += end + 1;
+                    return Ok(true);
                 }
-                None => return Ok(false),
+                None => self.position = self.chunk.len(),
             }
         }
         Ok(true)
@@ -440,10 +483,7 @@ impl<R: Read> Lines<R> {
         let mut line = String::new();
         let mut kept = 0;
         let mut clipped = false;
-        loop {
-            if !self.fill()? {
-                break;
-            }
+        while self.fill()? {
             let rest = &self.chunk[self.position..];
             let (segment, ended) = match rest.find('\n') {
                 Some(end) => (&rest[..end], true),
@@ -455,13 +495,15 @@ impl<R: Read> Lines<R> {
             } else {
                 segment
             };
-            for character in segment.chars() {
-                if kept == MAX_READ_LINE_CHARS {
-                    clipped = true;
-                    break;
+            if !clipped {
+                for character in segment.chars() {
+                    if kept == MAX_READ_LINE_CHARS {
+                        clipped = true;
+                        break;
+                    }
+                    line.push(character);
+                    kept += 1;
                 }
-                line.push(character);
-                kept += 1;
             }
             if ended {
                 // A `\r` split from its `\n` across chunks.
@@ -478,50 +520,51 @@ impl<R: Read> Lines<R> {
     }
 }
 
-/// Decodes a byte stream as UTF-8 in chunks, carrying a character split
-/// between reads into the next chunk.
+/// Decodes a byte stream as UTF-8 in chunks through one reused buffer,
+/// carrying a character split between reads into the next chunk.
 struct Utf8Chunks<R> {
     reader: R,
-    carry: Vec<u8>,
+    buffer: Box<[u8]>,
+    /// Bytes of an incomplete character at the start of `buffer`.
+    carry: usize,
 }
 
 impl<R: Read> Utf8Chunks<R> {
     fn new(reader: R) -> Self {
         Self {
             reader,
-            carry: Vec::new(),
+            // Room for a chunk after the at most three carried bytes.
+            buffer: vec![0; READ_CHUNK_BYTES + 3].into_boxed_slice(),
+            carry: 0,
         }
     }
 
-    fn next_chunk(&mut self) -> io::Result<Option<String>> {
+    /// Replace `out` with the next decoded text; false at the end.
+    fn next_chunk(&mut self, out: &mut String) -> io::Result<bool> {
         loop {
-            let mut bytes = std::mem::take(&mut self.carry);
-            let start = bytes.len();
-            bytes.resize(start + READ_CHUNK_BYTES, 0);
-            let read = self.reader.read(&mut bytes[start..])?;
-            bytes.truncate(start + read);
+            let read = match self.reader.read(&mut self.buffer[self.carry..]) {
+                Ok(read) => read,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            };
             if read == 0 {
-                return match bytes.is_empty() {
-                    true => Ok(None),
-                    false => Err(invalid_utf8()),
+                return match self.carry {
+                    0 => Ok(false),
+                    _ => Err(invalid_utf8()),
                 };
             }
-            match String::from_utf8(bytes) {
-                Ok(text) => return Ok(Some(text)),
-                Err(error) => {
-                    let utf8 = error.utf8_error();
-                    if utf8.error_len().is_some() {
-                        return Err(invalid_utf8());
-                    }
-                    let valid = utf8.valid_up_to();
-                    let mut bytes = error.into_bytes();
-                    self.carry = bytes.split_off(valid);
-                    if valid > 0 {
-                        return String::from_utf8(bytes)
-                            .map(Some)
-                            .map_err(|_| invalid_utf8());
-                    }
-                }
+            let filled = self.carry + read;
+            let valid = match std::str::from_utf8(&self.buffer[..filled]) {
+                Ok(_) => filled,
+                Err(error) if error.error_len().is_none() => error.valid_up_to(),
+                Err(_) => return Err(invalid_utf8()),
+            };
+            out.clear();
+            out.push_str(std::str::from_utf8(&self.buffer[..valid]).map_err(|_| invalid_utf8())?);
+            self.buffer.copy_within(valid..filled, 0);
+            self.carry = filled - valid;
+            if !out.is_empty() {
+                return Ok(true);
             }
         }
     }
@@ -533,7 +576,12 @@ fn invalid_utf8() -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{LINE_TRUNCATION_MARKER, Lines, MAX_READ_LINE_CHARS};
+    use conveyor_core::CancellationToken;
+
+    use super::{
+        LINE_TRUNCATION_MARKER, Lines, MAX_READ_LINE_CHARS, ReadManyArgs, WorkspaceError,
+        read_many, read_text_file,
+    };
 
     /// Reads at most `size` bytes per call, to split characters and lines.
     struct Trickle<'a> {
@@ -551,7 +599,7 @@ mod tests {
     }
 
     fn lines(bytes: &[u8], size: usize) -> std::io::Result<Vec<(String, bool)>> {
-        let mut lines = Lines::new(Trickle { bytes, size });
+        let mut lines = Lines::new(Trickle { bytes, size }, CancellationToken::new());
         let mut all = Vec::new();
         while let Some(line) = lines.next_line()? {
             all.push(line);
@@ -599,6 +647,55 @@ mod tests {
         assert!(
             lines(&[b'a', 0xe2, 0x82], 2).is_err(),
             "truncated character"
+        );
+    }
+
+    #[test]
+    fn skipped_lines_leave_the_reader_at_the_next_line() {
+        let long = "é".repeat(MAX_READ_LINE_CHARS * 3);
+        let text = format!("a\r\n{long}\nthird\nfourth");
+        for size in [1, 2, 3, 5, 64, 100_000] {
+            let mut lines = Lines::new(
+                Trickle {
+                    bytes: text.as_bytes(),
+                    size,
+                },
+                CancellationToken::new(),
+            );
+            assert!(lines.skip_line().unwrap());
+            assert!(lines.skip_line().unwrap());
+            assert_eq!(
+                lines.next_line().unwrap(),
+                Some(("third".to_owned(), false))
+            );
+            assert!(lines.skip_line().unwrap(), "a last line without a newline");
+            assert!(!lines.skip_line().unwrap());
+            assert_eq!(lines.next_line().unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn a_cancelled_read_stops_at_the_next_chunk() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "one\ntwo\n").unwrap();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel("Stopped");
+
+        let error = read_text_file(dir.path(), &cancellation, "notes.txt", 1, 10, 100).unwrap_err();
+        assert!(
+            matches!(&error, WorkspaceError::Cancelled(cancelled) if cancelled.reason() == "Stopped")
+        );
+
+        let args = ReadManyArgs {
+            paths: vec!["notes.txt".into(), "notes.txt".into()],
+            offset: 1,
+            limit: 10,
+            max_total_chars: 100,
+        };
+        let error = read_many(dir.path(), &cancellation, &args).unwrap_err();
+        assert!(
+            matches!(error, WorkspaceError::Cancelled(_)),
+            "not a per-file error"
         );
     }
 

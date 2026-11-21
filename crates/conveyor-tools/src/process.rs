@@ -28,6 +28,10 @@ pub(crate) struct Page<T> {
     pub(crate) observed: usize,
     /// Whether a record past the page was seen and the process was stopped.
     pub(crate) stopped_early: bool,
+    /// The exit code; `None` when the process was stopped or killed by a signal.
+    pub(crate) exit_code: Option<i32>,
+    /// The start of standard error, trimmed and decoded lossily.
+    pub(crate) errors: String,
 }
 
 /// Reads one record at a time from a process's standard output.
@@ -43,13 +47,12 @@ pub(crate) trait RecordFormat {
 }
 
 /// How [`collect_page`] runs a process and judges its outcome.
-pub(crate) struct PageRequest<'a> {
+pub(crate) struct PageRequest {
     pub(crate) offset: usize,
     pub(crate) limit: usize,
     pub(crate) timeout: Duration,
-    /// Most bytes of standard error kept for a failure message.
+    /// Most bytes of standard error kept.
     pub(crate) max_error_bytes: usize,
-    pub(crate) success_codes: &'a [i32],
 }
 
 /// Run `command` and collect the records from `offset` to `offset + limit`,
@@ -58,10 +61,11 @@ pub(crate) struct PageRequest<'a> {
 /// The process runs in its own process group with no standard input. It is
 /// stopped as soon as the look-ahead record arrives, when it exceeds the
 /// timeout, or when its output is malformed, and is always reaped before this
-/// returns. Dropping the future kills it.
+/// returns. Dropping the future kills it. The exit status is reported, not
+/// judged: the caller decides which outcomes are failures.
 pub(crate) async fn collect_page<F: RecordFormat>(
     mut command: Command,
-    request: PageRequest<'_>,
+    request: PageRequest,
     mut format: F,
 ) -> Result<Page<F::Item>, ProcessError> {
     command
@@ -77,7 +81,10 @@ pub(crate) async fn collect_page<F: RecordFormat>(
             "process output pipes were not created".into(),
         ));
     };
-    let stop_after = request.offset + request.limit + 1;
+    let stop_after = request
+        .offset
+        .saturating_add(request.limit)
+        .saturating_add(1);
 
     let work = async {
         let collect = async {
@@ -126,21 +133,12 @@ pub(crate) async fn collect_page<F: RecordFormat>(
     };
     let (items, observed, stopped_early) = collected.map_err(ProcessError::Output)?;
     let status = status.map_err(|error| ProcessError::Failed(error.to_string()))?;
-    let succeeded = status
-        .code()
-        .is_some_and(|code| request.success_codes.contains(&code));
-    if !stopped_early && !succeeded {
-        let message = String::from_utf8_lossy(&errors).trim().to_owned();
-        return Err(ProcessError::Failed(if message.is_empty() {
-            "process failed".into()
-        } else {
-            message
-        }));
-    }
     Ok(Page {
         items,
         observed,
         stopped_early,
+        exit_code: status.code(),
+        errors: String::from_utf8_lossy(&errors).trim().to_owned(),
     })
 }
 
@@ -237,13 +235,12 @@ mod tests {
         command
     }
 
-    fn request(offset: usize, limit: usize, timeout: Duration) -> PageRequest<'static> {
+    fn request(offset: usize, limit: usize, timeout: Duration) -> PageRequest {
         PageRequest {
             offset,
             limit,
             timeout,
             max_error_bytes: 8,
-            success_codes: &[0],
         }
     }
 
@@ -265,7 +262,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn output_that_ends_reports_every_record_and_the_exit_status() {
+    async fn output_that_ends_reports_every_record_exit_code_and_errors() {
         let page = collect_page(
             shell("printf 'a\\nb'"),
             request(0, 5, Duration::from_secs(20)),
@@ -277,14 +274,16 @@ mod tests {
         assert_eq!(page.observed, 2);
         assert!(!page.stopped_early);
 
-        let error = collect_page(
+        let failed = collect_page(
             shell("echo 'went wrong badly' >&2; exit 3"),
             request(0, 5, Duration::from_secs(20)),
             Lines,
         )
         .await
-        .unwrap_err();
-        assert!(matches!(&error, ProcessError::Failed(message) if message == "went wro"));
+        .unwrap();
+        assert_eq!(failed.exit_code, Some(3));
+        assert_eq!(failed.errors, "went wro");
+        assert_eq!(page.exit_code, Some(0));
     }
 
     #[tokio::test]

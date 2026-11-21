@@ -22,10 +22,19 @@ const MAX_SEARCH_LIMIT: usize = 500;
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_SEARCH_ERROR_BYTES: usize = 10_000;
 const MAX_SEARCH_MATCH_CHARS: usize = 4_000;
-const MAX_SEARCH_RECORD_BYTES: usize = MAX_SEARCH_MATCH_CHARS + 1_000;
+/// The characters of paths and matched text one content search returns.
+const MAX_SEARCH_OUTPUT_CHARS: usize = 100_000;
 const MAX_SEARCH_PATH_BYTES: usize = 32_768;
-/// ripgrep exits with 1 when nothing matched.
-const RIPGREP_SUCCESS: &[i32] = &[0, 1];
+/// The bytes past which ripgrep previews a matching line instead of printing
+/// it. ripgrep measures lines in bytes but cuts previews by characters, so
+/// this is four bytes per kept character: a line it previews always has more
+/// characters than are kept, and shorter lines arrive whole to be cut here.
+const RIPGREP_MAX_COLUMNS: usize = MAX_SEARCH_MATCH_CHARS * 4;
+/// A path, a line number, and a preview of up to [`RIPGREP_MAX_COLUMNS`]
+/// characters of as many as four bytes each.
+const MAX_SEARCH_LINE_BYTES: usize = MAX_SEARCH_PATH_BYTES + RIPGREP_MAX_COLUMNS * 4 + 1_000;
+/// What ripgrep appends to a long matching line it cuts short.
+const PREVIEW_SUFFIX: &str = " [... omitted end of long line]";
 
 fn default_path() -> String {
     ".".into()
@@ -112,7 +121,7 @@ impl Tool for SearchFiles {
         context: &ToolContext,
     ) -> Result<Value, WorkspaceError> {
         let path = args.path.clone();
-        let (resolved, is_file) = blocking(context, move |workspace| {
+        let (resolved, is_file) = blocking(context, move |workspace, _| {
             let resolved = resolve(workspace, &path)?;
             let metadata = std::fs::metadata(&resolved.path)
                 .map_err(|_| WorkspaceError::NotFound(path.clone()))?;
@@ -154,7 +163,7 @@ impl Tool for SearchFiles {
                             "--line-number",
                             "--max-columns",
                         ])
-                        .arg(MAX_SEARCH_MATCH_CHARS.to_string())
+                        .arg(RIPGREP_MAX_COLUMNS.to_string())
                         .args([
                             "--max-columns-preview",
                             "--sort",
@@ -185,11 +194,15 @@ impl Tool for SearchFiles {
     }
 }
 
-/// ripgrep run from the workspace root, ignoring any user configuration file
-/// so its output keeps the format parsed here.
+/// ripgrep run from the workspace root. A user configuration file is ignored
+/// so the output keeps the format parsed here, `.gitignore` applies even when
+/// the workspace is not a git repository, and files that cannot be read are
+/// skipped quietly rather than failing the search.
 fn ripgrep(root: &Path) -> Command {
     let mut command = Command::new("rg");
-    command.arg("--no-config").current_dir(root);
+    command
+        .args(["--no-config", "--no-require-git", "--no-messages"])
+        .current_dir(root);
     command
 }
 
@@ -212,16 +225,29 @@ async fn run<F: RecordFormat>(
         limit,
         timeout: SEARCH_TIMEOUT,
         max_error_bytes: MAX_SEARCH_ERROR_BYTES,
-        success_codes: RIPGREP_SUCCESS,
     };
-    collect_page(command, request, format)
+    let page = collect_page(command, request, format)
         .await
         .map_err(|error| match error {
             ProcessError::Spawn(error) if error.kind() == io::ErrorKind::NotFound => {
                 WorkspaceError::RipgrepMissing
             }
             other => WorkspaceError::Ripgrep(other.to_string()),
-        })
+        })?;
+    // ripgrep exits with 1 when nothing matched, and with 2 after any error.
+    // With `--no-messages`, an unreadable file is an error that prints
+    // nothing, so 2 with no message still returns what was found.
+    let finished = page.stopped_early
+        || matches!(page.exit_code, Some(0 | 1))
+        || (page.exit_code == Some(2) && page.errors.is_empty());
+    if !finished {
+        return Err(WorkspaceError::Ripgrep(if page.errors.is_empty() {
+            "process failed".into()
+        } else {
+            page.errors
+        }));
+    }
+    Ok(page)
 }
 
 /// A file-name search of a single file, matched without ripgrep.
@@ -233,16 +259,18 @@ fn single_file(shown: &str, pattern: &str, offset: usize, limit: usize) -> Searc
     } else {
         Vec::new()
     };
-    let end = offset.saturating_add(limit);
+    let page: Vec<String> = files.iter().skip(offset).take(limit).cloned().collect();
+    let truncated = offset.saturating_add(limit) < files.len();
     SearchResult::Files {
         pattern: pattern.to_owned(),
         path: shown.to_owned(),
-        files: files.iter().skip(offset).take(limit).cloned().collect(),
+        next_offset: truncated.then(|| offset + page.len()),
+        files: page,
         offset,
         limit,
         total_count: files.len(),
         total_count_is_exact: true,
-        truncated: end < files.len(),
+        truncated,
     }
 }
 
@@ -336,6 +364,9 @@ enum SearchResult {
         total_count: usize,
         total_count_is_exact: bool,
         truncated: bool,
+        /// Where the next page starts, when there is one.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        next_offset: Option<usize>,
     },
     Content {
         pattern: String,
@@ -346,6 +377,9 @@ enum SearchResult {
         total_count: usize,
         total_count_is_exact: bool,
         truncated: bool,
+        /// Where the next page starts, when there is one.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        next_offset: Option<usize>,
     },
 }
 
@@ -360,6 +394,7 @@ impl SearchResult {
         Self::Files {
             pattern: pattern.to_owned(),
             path: path.to_owned(),
+            next_offset: page.stopped_early.then(|| offset + page.items.len()),
             files: page.items,
             offset,
             limit,
@@ -376,15 +411,30 @@ impl SearchResult {
         limit: usize,
         page: crate::process::Page<Match>,
     ) -> Self {
+        let mut matches = page.items;
+        // Keep the page within the output budget, always returning at least
+        // one match so paging moves forward.
+        let mut used = 0;
+        let kept = matches
+            .iter()
+            .position(|found| {
+                used += found.path.chars().count() + found.text.chars().count();
+                used > MAX_SEARCH_OUTPUT_CHARS
+            })
+            .map_or(matches.len(), |over| over.max(1));
+        let budget_cut = kept < matches.len();
+        matches.truncate(kept);
+        let truncated = page.stopped_early || budget_cut;
         Self::Content {
             pattern: pattern.to_owned(),
             path: path.to_owned(),
-            matches: page.items,
+            next_offset: truncated.then(|| offset + matches.len()),
+            matches,
             offset,
             limit,
             total_count: page.observed,
             total_count_is_exact: !page.stopped_early,
-            truncated: page.stopped_early,
+            truncated,
         }
     }
 }
@@ -431,41 +481,47 @@ impl RecordFormat for Files {
     }
 }
 
-/// `rg --null --line-number` output: a NUL-terminated path, then
-/// `LINE:TEXT` up to the newline.
+/// `rg --null --line-number` output: one line per match, holding the path,
+/// a NUL, and `LINE:TEXT`. A line with no NUL is ripgrep's notice that a
+/// binary file matched, which is skipped as binary files are in a directory
+/// search.
 struct Matches;
 
 impl RecordFormat for Matches {
     type Item = Match;
 
     async fn next(&mut self, reader: &mut Delimited<ChildStdout>) -> Result<Option<Match>, String> {
-        let Some(path) = reader
-            .read_until(0, MAX_SEARCH_PATH_BYTES)
-            .await
-            .map_err(|error| error.to_string())?
-        else {
-            return Ok(None);
-        };
-        let record = reader
-            .read_until(b'\n', MAX_SEARCH_RECORD_BYTES)
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or("ripgrep emitted an incomplete match")?;
-        let record = String::from_utf8_lossy(&record);
-        let (line, text) = record
-            .split_once(':')
-            .ok_or("ripgrep emitted an invalid match")?;
-        let line = line
-            .parse()
-            .map_err(|_| "ripgrep emitted an invalid line number")?;
-        let text = text.strip_suffix('\r').unwrap_or(text);
-        let text_truncated = text.chars().count() > MAX_SEARCH_MATCH_CHARS;
-        Ok(Some(Match {
-            path: normalize_path(&path),
-            line,
-            text: text.chars().take(MAX_SEARCH_MATCH_CHARS).collect(),
-            text_truncated,
-        }))
+        loop {
+            let Some(line) = reader
+                .read_until(b'\n', MAX_SEARCH_LINE_BYTES)
+                .await
+                .map_err(|error| error.to_string())?
+            else {
+                return Ok(None);
+            };
+            let Some(separator) = line.iter().position(|&byte| byte == 0) else {
+                continue;
+            };
+            let record = String::from_utf8_lossy(&line[separator + 1..]);
+            let (number, text) = record
+                .split_once(':')
+                .ok_or("ripgrep emitted an invalid match")?;
+            let number = number
+                .parse()
+                .map_err(|_| "ripgrep emitted an invalid line number")?;
+            let text = text.strip_suffix('\r').unwrap_or(text);
+            let (text, previewed) = match text.strip_suffix(PREVIEW_SUFFIX) {
+                Some(preview) => (preview, true),
+                None => (text, false),
+            };
+            let clipped = text.chars().count() > MAX_SEARCH_MATCH_CHARS;
+            return Ok(Some(Match {
+                path: normalize_path(&line[..separator]),
+                line: number,
+                text: text.chars().take(MAX_SEARCH_MATCH_CHARS).collect(),
+                text_truncated: previewed || clipped,
+            }));
+        }
     }
 }
 

@@ -432,6 +432,7 @@ async fn search_files_pages_within_a_path() {
     assert_eq!(files["total_count"], 2);
     assert_eq!(files["total_count_is_exact"], false);
     assert_eq!(files["truncated"], true);
+    assert_eq!(files["next_offset"], 1);
 
     let second = fixture
         .call(
@@ -444,6 +445,7 @@ async fn search_files_pages_within_a_path() {
     assert_eq!(second["total_count"], 3);
     assert_eq!(second["total_count_is_exact"], true);
     assert_eq!(second["truncated"], false);
+    assert!(second.get("next_offset").is_none());
 
     let content = fixture
         .call(
@@ -520,15 +522,157 @@ async fn search_files_bounds_long_matching_lines() {
     let found = &result["matches"][0];
     assert_eq!(found["text"].as_str().unwrap().chars().count(), 4_000);
     assert_eq!(found["text_truncated"], true);
+
+    // ripgrep measures long lines in bytes but cuts its preview by
+    // characters, so a line of four-byte characters makes a record of about
+    // 64 KB.
+    fixture.write("emoji.txt", format!("crab{}\n", "🦀".repeat(17_000)));
+    let result = fixture
+        .call(
+            &SearchFiles,
+            json!({"pattern": "crab", "target": "content", "path": "emoji.txt"}),
+        )
+        .await
+        .unwrap();
+    let found = &result["matches"][0];
+    let text = found["text"].as_str().unwrap();
+    assert!(text.starts_with("crab🦀"));
+    assert_eq!(text.chars().count(), 4_000);
+    assert!(
+        !text.contains("omitted"),
+        "ripgrep's marker is replaced by the flag"
+    );
+    assert_eq!(found["text_truncated"], true);
+
+    // A multibyte line over 4,000 bytes but under 4,000 characters is whole.
+    fixture.write("accents.txt", format!("café{}\n", "é".repeat(2_500)));
+    let result = fixture
+        .call(
+            &SearchFiles,
+            json!({"pattern": "café", "target": "content", "path": "accents.txt"}),
+        )
+        .await
+        .unwrap();
+    let found = &result["matches"][0];
+    let text = found["text"].as_str().unwrap();
+    assert_eq!(text.chars().count(), 2_504);
+    assert!(text.ends_with('é'));
+    assert!(found.get("text_truncated").is_none());
+}
+
+#[tokio::test]
+async fn content_searches_stay_within_an_output_budget() {
+    assert!(ripgrep_installed(), "search tests need ripgrep (rg)");
+    let fixture = Fixture::new();
+    let line = format!("needle {}\n", "x".repeat(3_900));
+    fixture.write("wide.txt", line.repeat(60));
+
+    let result = fixture
+        .call(
+            &SearchFiles,
+            json!({"pattern": "needle", "target": "content", "limit": 60}),
+        )
+        .await
+        .unwrap();
+
+    let returned = result["matches"].as_array().unwrap().len();
+    assert!((20..30).contains(&returned), "{returned} matches");
+    let text_chars: usize = result["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|found| found["text"].as_str().unwrap().chars().count())
+        .sum();
+    assert!(text_chars <= 100_000);
+    assert_eq!(result["truncated"], true);
+    assert_eq!(result["next_offset"], returned);
+    assert_eq!(result["total_count"], 60);
+    assert_eq!(result["total_count_is_exact"], true);
+
+    let next = fixture
+        .call(
+            &SearchFiles,
+            json!({"pattern": "needle", "target": "content", "limit": 60, "offset": returned}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(next["matches"][0]["line"], returned + 1);
+}
+
+#[tokio::test]
+async fn binary_files_are_skipped_not_fatal() {
+    assert!(ripgrep_installed(), "search tests need ripgrep (rg)");
+    let fixture = Fixture::new();
+    fixture.write("data.bin", b"needle\0binary\n");
+    fixture.write("text.txt", "needle\n");
+
+    let direct = fixture
+        .call(
+            &SearchFiles,
+            json!({"pattern": "needle", "target": "content", "path": "data.bin"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(direct["matches"], json!([]));
+
+    let walked = fixture
+        .call(
+            &SearchFiles,
+            json!({"pattern": "needle", "target": "content"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        walked["matches"],
+        json!([{"path": "text.txt", "line": 1, "text": "needle"}])
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unreadable_directories_do_not_hide_other_results() {
+    use std::os::unix::fs::PermissionsExt;
+
+    assert!(ripgrep_installed(), "search tests need ripgrep (rg)");
+    let fixture = Fixture::new();
+    fixture.write("locked/hidden.txt", "needle\n");
+    fixture.write("open.txt", "needle\n");
+    let locked = fixture.workspace.join("locked");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    // Permissions do not apply to the superuser.
+    let enforced = fs::read_dir(&locked).is_err();
+
+    let content = fixture
+        .call(
+            &SearchFiles,
+            json!({"pattern": "needle", "target": "content"}),
+        )
+        .await;
+    let files = fixture
+        .call(&SearchFiles, json!({"pattern": "*.txt"}))
+        .await;
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+    if enforced {
+        let content = content.unwrap();
+        assert_eq!(
+            content["matches"],
+            json!([{"path": "open.txt", "line": 1, "text": "needle"}])
+        );
+        assert_eq!(files.unwrap()["files"], json!(["open.txt"]));
+    }
 }
 
 #[tokio::test]
 async fn search_files_respects_ignore_files_and_single_file_paths() {
     assert!(ripgrep_installed(), "search tests need ripgrep (rg)");
     let fixture = Fixture::new();
+    // The workspace is not a git repository; `.gitignore` applies anyway.
+    fixture.write(".gitignore", "node_modules/\n");
     fixture.write(".ignore", "build/\n");
     fixture.write("kept.txt", "");
     fixture.write("build/out.txt", "");
+    fixture.write("node_modules/dep/readme.txt", "");
     fixture.write("src/lib.rs", "");
 
     let result = fixture
