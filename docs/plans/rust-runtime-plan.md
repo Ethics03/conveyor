@@ -96,8 +96,9 @@ conveyor/
 `conveyor-core`, `conveyor-http`, `conveyor-storage`, `conveyor-agent`, and
 `conveyor-harness` are implemented. `conveyor-tools` implements the registry,
 workspace path containment, the read-only tools, and bounded process output
-collection; its shell module and `conveyor-reqwest` are scaffolds documenting
-their boundaries. Add working behavior, integration
+collection; its shell module is a scaffold documenting its boundary.
+`conveyor-reqwest` implements the HTTP transport with Rustls, the system's
+proxy settings, and no redirects. Add working behavior, integration
 suites, and runnable examples incrementally. Do not add placeholder passing tests
 or successful no-op implementations.
 

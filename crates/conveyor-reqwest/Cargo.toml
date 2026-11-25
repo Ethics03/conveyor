@@ -5,3 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 description = "Reqwest implementation of Conveyor's async HTTP transport"
+
+[dependencies]
+conveyor-http.workspace = true
+reqwest.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
