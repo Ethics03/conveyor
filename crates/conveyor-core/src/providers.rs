@@ -1,10 +1,16 @@
 //! The provider contract and provider-neutral request and response types.
 //!
 //! A [`Provider`] turns one [`ProviderRequest`] into one [`ProviderResponse`].
+//! The Anthropic and OpenAI adapters need the `anthropic` and `openai`
+//! features.
 
 #[cfg(feature = "anthropic")]
 pub mod anthropic;
 pub mod fake;
+#[cfg(feature = "openai")]
+pub mod openai;
+#[cfg(any(feature = "anthropic", feature = "openai"))]
+mod retry;
 
 use std::{error::Error as StdError, fmt::Debug, time::Duration};
 

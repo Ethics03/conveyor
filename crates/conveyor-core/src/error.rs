@@ -18,6 +18,9 @@ pub enum Error {
     CompactionTriggerTooLow { minimum: u32 },
     #[error("API key contains characters not allowed in an HTTP header")]
     InvalidApiKey,
+    /// A configured header value, such as an organization ID.
+    #[error("{0} contains characters not allowed in an HTTP header")]
+    InvalidHeaderValue(&'static str),
     #[error("Provider base URL must be an absolute http(s) URL")]
     InvalidBaseUrl,
 }

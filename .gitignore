@@ -1,3 +1,5 @@
 /target
 /.conveyor/
-/.env
+.env
+.env.*
+!.env.example
