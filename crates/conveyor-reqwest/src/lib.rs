@@ -20,6 +20,10 @@ use conveyor_http::{BoxFuture, Bytes, Error, ErrorKind, HttpTransport, Request, 
 
 /// How long [`ReqwestTransport::new`] waits to connect before the attempt fails.
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a connection may sit idle before the OS sends keepalive probes.
+/// A model call can be silent for minutes; probes stop NATs and proxies from
+/// dropping the connection meanwhile.
+pub const TCP_KEEPALIVE: Duration = Duration::from_secs(30);
 /// The largest successful response body read by default; larger bodies fail.
 pub const DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 /// The most of an unsuccessful response's body that is kept.
@@ -39,6 +43,10 @@ pub const ERROR_BODY_BYTES: usize = 64 * 1024;
 /// [`ERROR_BODY_BYTES`] of its body, enough for the error it describes; a
 /// successful one larger than the body limit fails with
 /// [`ErrorKind::Body`].
+///
+/// A connection that fails after the request is sent, before the whole
+/// response arrives, is [`ErrorKind::Interrupted`], which is retryable. This
+/// covers a pooled connection the server closed while it sat idle.
 #[derive(Clone)]
 pub struct ReqwestTransport {
     client: reqwest::Client,
@@ -48,13 +56,16 @@ pub struct ReqwestTransport {
 impl ReqwestTransport {
     /// A transport using Rustls with the system's certificate verifier,
     /// HTTP/2 where the server offers it, the system's proxy settings, a
-    /// [`DEFAULT_CONNECT_TIMEOUT`], and no redirects.
+    /// [`DEFAULT_CONNECT_TIMEOUT`], [`TCP_KEEPALIVE`] probes, and no
+    /// redirects. It sends no `User-Agent` of its own; a provider that needs
+    /// one sets it on its requests.
     ///
     /// Fails with [`ErrorKind::Request`] when the TLS backend or proxy
     /// settings cannot be initialized.
     pub fn new() -> Result<Self, Error> {
         let client = reqwest::Client::builder()
             .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+            .tcp_keepalive(TCP_KEEPALIVE)
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| Error::new(ErrorKind::Request, error))?;
@@ -151,24 +162,29 @@ async fn read_prefix(response: &mut reqwest::Response, limit: usize) -> Result<B
     Ok(Bytes::from(body))
 }
 
+/// The next body chunk. A failed read means the connection broke before the
+/// response was complete.
 async fn next_chunk(response: &mut reqwest::Response) -> Result<Option<Bytes>, Error> {
     response
         .chunk()
         .await
-        .map_err(|error| Error::new(ErrorKind::Body, error))
+        .map_err(|error| Error::new(ErrorKind::Interrupted, error))
 }
 
-/// The transport error kind for a reqwest failure. A connect timeout is a
-/// timeout; both are retryable.
+/// The transport error kind for a failure to send a request and receive its
+/// response head. A request reqwest could not build is the only one that
+/// would fail again unchanged; anything else after connecting, such as a
+/// connection closed before the response or an HTTP/2 stream reset, is an
+/// interruption.
 fn classify(error: reqwest::Error) -> Error {
     let kind = if error.is_timeout() {
         ErrorKind::Timeout
     } else if error.is_connect() {
         ErrorKind::Connect
-    } else if error.is_body() || error.is_decode() {
-        ErrorKind::Body
-    } else {
+    } else if error.is_builder() {
         ErrorKind::Request
+    } else {
+        ErrorKind::Interrupted
     };
     Error::new(kind, error)
 }

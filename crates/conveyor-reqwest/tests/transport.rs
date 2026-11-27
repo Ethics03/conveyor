@@ -1,4 +1,10 @@
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use conveyor_http::{Bytes, ErrorKind, HttpTransport, Method, Request, StatusCode};
 use conveyor_reqwest::{ERROR_BODY_BYTES, ReqwestTransport};
@@ -123,6 +129,11 @@ async fn requests_and_responses_round_trip() {
     assert_eq!(received[0].request_line(), "POST /v1/responses HTTP/1.1");
     assert_eq!(received[0].header("x-api-key"), Some("secret"));
     assert_eq!(received[0].header("content-type"), Some("application/json"));
+    assert_eq!(
+        received[0].header("user-agent"),
+        None,
+        "only providers set one"
+    );
     assert_eq!(received[0].body, br#"{"model":"m"}"#);
 }
 
@@ -206,6 +217,121 @@ async fn connection_failures_are_retryable() {
 
     assert_eq!(error.kind(), ErrorKind::Connect);
     assert!(error.is_retryable());
+}
+
+/// Accepts one connection, reads the request head and body, then writes
+/// `reply` (possibly nothing) and closes.
+async fn serve_then_close(reply: &'static [u8]) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buffer = Vec::new();
+        while !buffer.ends_with(b"{}") {
+            let mut chunk = [0; 4096];
+            let read = stream.read(&mut chunk).await.unwrap();
+            if read == 0 {
+                return;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+        }
+        stream.write_all(reply).await.unwrap();
+    });
+    base
+}
+
+#[tokio::test]
+async fn connections_closed_before_or_during_the_response_are_retryable() {
+    let transport = ReqwestTransport::new().unwrap();
+    // Closed without answering, as a pooled connection the server dropped is.
+    let base = serve_then_close(b"").await;
+    let error = timeout(WAIT, transport.send(post(&base, "{}")))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Interrupted);
+    assert!(error.is_retryable());
+
+    // Closed partway through a successful body.
+    let base = serve_then_close(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial").await;
+    let error = timeout(WAIT, transport.send(post(&base, "{}")))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Interrupted);
+    assert!(error.is_retryable());
+    assert_eq!(error.to_string(), "HTTP exchange failed");
+}
+
+#[tokio::test]
+async fn sequential_requests_reuse_one_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let connections = Arc::new(AtomicUsize::new(0));
+    let accepted = connections.clone();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            accepted.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                let mut buffer = Vec::new();
+                loop {
+                    let mut chunk = [0; 4096];
+                    let Ok(read) = stream.read(&mut chunk).await else {
+                        return;
+                    };
+                    if read == 0 {
+                        return;
+                    }
+                    buffer.extend_from_slice(&chunk[..read]);
+                    if buffer.ends_with(b"{}") {
+                        buffer.clear();
+                        let reply = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+                        if stream.write_all(reply).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            });
+        }
+    });
+    let transport = ReqwestTransport::new().unwrap();
+
+    for _ in 0..3 {
+        let reply = timeout(WAIT, transport.send(post(&base, "{}")))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply.body().as_ref(), b"ok");
+    }
+    assert_eq!(connections.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn dropping_a_request_closes_its_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut chunk = [0; 4096];
+        let mut buffer = Vec::new();
+        while !buffer.ends_with(b"{}") {
+            let read = stream.read(&mut chunk).await.unwrap();
+            buffer.extend_from_slice(&chunk[..read]);
+        }
+        // Never answer; the next read ends when the client goes away.
+        stream.read(&mut chunk).await.unwrap_or(0)
+    });
+    let transport = ReqwestTransport::new().unwrap();
+
+    let pending = timeout(
+        Duration::from_millis(200),
+        transport.send(post(&base, "{}")),
+    )
+    .await;
+
+    assert!(pending.is_err(), "the server never answers");
+    assert_eq!(timeout(WAIT, server).await.unwrap().unwrap(), 0);
 }
 
 #[tokio::test]
