@@ -34,9 +34,12 @@ pub enum ErrorKind {
     Connect,
     /// The transport's own deadline elapsed.
     Timeout,
-    /// The request was rejected before or while sending it.
+    /// The request could not be sent as built, such as a relative URL.
     Request,
-    /// The response body could not be read.
+    /// The connection failed after the request was sent, before the whole
+    /// response arrived. The server may already have acted on the request.
+    Interrupted,
+    /// The response body was rejected, such as for exceeding a size limit.
     Body,
 }
 
@@ -46,6 +49,7 @@ impl fmt::Display for ErrorKind {
             Self::Connect => "connection",
             Self::Timeout => "timeout",
             Self::Request => "request",
+            Self::Interrupted => "exchange",
             Self::Body => "response body",
         })
     }
@@ -72,8 +76,12 @@ impl Error {
         self.kind
     }
 
-    /// Whether sending the same request again may succeed.
+    /// Whether sending the same request again may succeed: the connection
+    /// could not be made, timed out, or was interrupted.
     pub fn is_retryable(&self) -> bool {
-        matches!(self.kind, ErrorKind::Connect | ErrorKind::Timeout)
+        matches!(
+            self.kind,
+            ErrorKind::Connect | ErrorKind::Timeout | ErrorKind::Interrupted
+        )
     }
 }

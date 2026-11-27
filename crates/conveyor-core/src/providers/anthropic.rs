@@ -6,16 +6,14 @@
 
 use std::{fmt, sync::Arc, time::Duration};
 
-use conveyor_http::{
-    Bytes, HeaderMap, HeaderValue, HttpTransport, Method, Request, Response, StatusCode, Uri,
-    header,
-};
+use conveyor_http::{Bytes, HeaderValue, HttpTransport, Method, Request, Response, Uri, header};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::{
-    BoxError, FinishReason, ModelLimits, Provider, ProviderError, ProviderMessage, ProviderRequest,
+    FinishReason, ModelLimits, Provider, ProviderError, ProviderMessage, ProviderRequest,
     ProviderResponse, ReplayState, ToolDefinition,
+    retry::{self, Failure, RetryPolicy},
 };
 use crate::{
     BoxFuture, Error,
@@ -53,10 +51,6 @@ const COMPACTION_MODEL_MARKERS: [&str; 8] = [
     "claude-sonnet-4-6",
     "claude-sonnet-5",
 ];
-const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(500);
-const MAX_RETRY_DELAY: Duration = Duration::from_secs(8);
-const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
-const ERROR_BODY_LIMIT: usize = 1_000;
 
 /// Anthropic adapter settings. Validated by [`AnthropicProvider::new`].
 #[derive(Clone)]
@@ -155,11 +149,7 @@ impl AnthropicProvider {
         let mut api_key =
             HeaderValue::from_str(&config.api_key).map_err(|_| Error::InvalidApiKey)?;
         api_key.set_sensitive(true);
-        let endpoint = format!("{}/v1/messages", config.base_url.trim_end_matches('/'))
-            .parse::<Uri>()
-            .ok()
-            .filter(|uri| uri.scheme().is_some() && uri.authority().is_some())
-            .ok_or(Error::InvalidBaseUrl)?;
+        let endpoint = retry::endpoint(&config.base_url, "/v1/messages")?;
         Ok(Self {
             config,
             endpoint,
@@ -178,33 +168,18 @@ impl AnthropicProvider {
             serde_json::to_vec(&encoded.body)
                 .map_err(|error| ProviderError::InvalidRequest(error.to_string()))?,
         );
-        let mut attempt = 0;
-        loop {
-            let http_request = self.http_request(body.clone(), encoded.compaction)?;
-            let outcome =
-                tokio::time::timeout(self.config.timeout, self.transport.send(http_request)).await;
-            let failure = match outcome {
-                Ok(Ok(response)) if response.status().is_success() => {
-                    return decode_response(response.body());
-                }
-                Ok(Ok(response)) => api_failure(&response),
-                Ok(Err(error)) => Failure {
-                    retryable: error.is_retryable(),
-                    retry_after: None,
-                    error: ProviderError::Transport(BoxError::from(error)),
-                },
-                Err(_) => Failure {
-                    retryable: true,
-                    retry_after: None,
-                    error: ProviderError::Timeout(self.config.timeout),
-                },
-            };
-            if !failure.retryable || attempt >= self.config.max_retries {
-                return Err(failure.error);
-            }
-            tokio::time::sleep(failure.retry_after.unwrap_or_else(|| backoff(attempt))).await;
-            attempt += 1;
-        }
+        let policy = RetryPolicy {
+            timeout: self.config.timeout,
+            max_retries: self.config.max_retries,
+        };
+        let response = retry::send(
+            self.transport.as_ref(),
+            policy,
+            || self.http_request(body.clone(), encoded.compaction),
+            api_failure,
+        )
+        .await?;
+        decode_response(response.body())
     }
 
     fn http_request(&self, body: Bytes, compaction: bool) -> Result<Request<Bytes>, ProviderError> {
@@ -499,7 +474,7 @@ fn decode_response(body: &[u8]) -> Result<ProviderResponse, ProviderError> {
     raw.insert("provider".into(), PROVIDER_NAME.into());
     raw.insert("model".into(), response.model.into());
     raw.insert("response_id".into(), response.id.into());
-    raw.insert("usage".into(), without_nulls(response.usage));
+    raw.insert("usage".into(), retry::without_nulls(response.usage));
     Ok(ProviderResponse {
         content: text.join("\n").trim().to_owned(),
         tool_calls,
@@ -523,27 +498,6 @@ fn finish_reason(stop_reason: Option<&str>) -> FinishReason {
     }
 }
 
-/// Drop null object fields recursively.
-fn without_nulls(value: Value) -> Value {
-    match value {
-        Value::Object(object) => Value::Object(
-            object
-                .into_iter()
-                .filter(|(_, value)| !value.is_null())
-                .map(|(key, value)| (key, without_nulls(value)))
-                .collect(),
-        ),
-        Value::Array(values) => Value::Array(values.into_iter().map(without_nulls).collect()),
-        other => other,
-    }
-}
-
-struct Failure {
-    error: ProviderError,
-    retryable: bool,
-    retry_after: Option<Duration>,
-}
-
 #[derive(Deserialize)]
 struct WireErrorBody {
     error: WireError,
@@ -563,57 +517,14 @@ fn api_failure(response: &Response<Bytes>) -> Failure {
         Ok(WireErrorBody { error }) => (error.kind, error.message),
         Err(_) => (None, None),
     };
-    let message = message.unwrap_or_else(|| {
-        let body = String::from_utf8_lossy(response.body());
-        let body = body.trim();
-        match body.char_indices().nth(ERROR_BODY_LIMIT) {
-            Some((end, _)) => format!("{}…", &body[..end]),
-            None if body.is_empty() => status.canonical_reason().unwrap_or("").to_owned(),
-            None => body.to_owned(),
-        }
-    });
     Failure {
-        retryable: should_retry(status, headers),
-        retry_after: retry_after(headers),
+        retryable: retry::should_retry(status, headers),
+        retry_after: retry::retry_after(headers),
         error: ProviderError::Api {
             status: status.as_u16(),
             kind,
-            message,
-            request_id: header_str(headers, "request-id").map(str::to_owned),
+            message: message.unwrap_or_else(|| retry::error_text(response)),
+            request_id: retry::header_str(headers, "request-id").map(str::to_owned),
         },
     }
-}
-
-/// Honor `x-should-retry`, otherwise retry timeouts, conflicts, rate limits,
-/// and server errors.
-fn should_retry(status: StatusCode, headers: &HeaderMap) -> bool {
-    match header_str(headers, "x-should-retry") {
-        Some("true") => true,
-        Some("false") => false,
-        _ => matches!(status.as_u16(), 408 | 409 | 429) || status.is_server_error(),
-    }
-}
-
-/// A server-requested delay of at most a minute, in milliseconds or seconds.
-fn retry_after(headers: &HeaderMap) -> Option<Duration> {
-    let millis = header_str(headers, "retry-after-ms")
-        .and_then(|value| value.parse::<f64>().ok())
-        .map(|millis| millis / 1_000.0);
-    let seconds = millis.or_else(|| {
-        header_str(headers, "retry-after").and_then(|value| value.parse::<f64>().ok())
-    })?;
-    Duration::try_from_secs_f64(seconds)
-        .ok()
-        .filter(|delay| !delay.is_zero() && *delay <= MAX_RETRY_AFTER)
-}
-
-/// Exponential backoff from 0.5 seconds, capped at 8 seconds.
-fn backoff(attempt: u32) -> Duration {
-    INITIAL_RETRY_DELAY
-        .saturating_mul(2u32.saturating_pow(attempt))
-        .min(MAX_RETRY_DELAY)
-}
-
-fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    headers.get(name).and_then(|value| value.to_str().ok())
 }
