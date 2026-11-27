@@ -93,6 +93,19 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Try it
+
+Chat in the terminal with an agent that can read and search a repository,
+backed by OpenAI. Set `OPENAI_API_KEY` first; `OPENAI_MODEL` and
+`OPENAI_REASONING_EFFORT` are optional.
+
+```fish
+cargo run --example chat_openai -- path/to/repository
+```
+
+Ctrl-C stops a running turn, and Ctrl-D quits. `cargo run --example
+smoke_openai` runs a short scripted session instead.
+
 ## Workspace
 
 The root `conveyor` crate re-exports the component crates; depend on a component
