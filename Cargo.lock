@@ -179,6 +179,8 @@ dependencies = [
  "conveyor-reqwest",
  "conveyor-storage",
  "conveyor-tools",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

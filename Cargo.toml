@@ -41,9 +41,13 @@ tempfile = "3"
 
 [dependencies]
 conveyor-agent.workspace = true
-conveyor-core = { workspace = true, features = ["anthropic"] }
+conveyor-core = { workspace = true, features = ["anthropic", "openai"] }
 conveyor-harness.workspace = true
 conveyor-http.workspace = true
 conveyor-reqwest.workspace = true
 conveyor-storage.workspace = true
 conveyor-tools.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

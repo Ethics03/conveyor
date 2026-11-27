@@ -2,12 +2,13 @@
 
 Status: milestones 1 (domain records and async storage) and 2 (a complete
 fake-provider turn) are implemented, as are the `conveyor-core` contracts
-(cancellation, providers with fake and Anthropic adapters, and tools) and the
-`conveyor-http` transport contract. Milestone 3 is in progress: the tool
-registry, sequential dispatch in the run loop, and the read-only tools
-(`read_file`, `read_many`, `search_files`) are implemented. Approvals, the
-write and shell tools, context planning, and the reqwest transport remain
-subsequent work.
+(cancellation, providers with fake, Anthropic, and OpenAI adapters, and
+tools), the `conveyor-http` transport contract, and the `conveyor-reqwest`
+transport. Milestone 3 is in progress: the tool registry, sequential
+dispatch in the run loop, and the read-only tools (`read_file`, `read_many`,
+`search_files`) are implemented. Approvals, the write and shell tools, and
+context planning remain subsequent work. `examples/smoke_openai.rs` runs a
+live read-only agent session against OpenAI.
 
 ## Product and scope
 

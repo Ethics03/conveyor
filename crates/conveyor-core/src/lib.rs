@@ -1,6 +1,7 @@
 //! Domain records, cancellation, and provider and tool contracts for Conveyor.
 //!
-//! The Anthropic adapter requires the `anthropic` feature.
+//! The Anthropic and OpenAI adapters require the `anthropic` and `openai`
+//! features.
 
 mod cancellation;
 mod error;

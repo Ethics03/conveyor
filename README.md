@@ -57,11 +57,12 @@ tools are next after parity with the earlier Python implementation.
 | Area | Status |
 | --- | --- |
 | Durable sessions, runs, messages, events, and approvals (SQLite) | Done |
-| Provider contract, fake provider, Anthropic adapter | Done |
+| Provider contract, fake provider, Anthropic and OpenAI adapters | Done |
 | Agent run loop: provider calls, run outcomes, cancellation | Done |
 | Runtime: each turn as a background task, one turn per session, interrupt, shutdown | Done |
 | Built-in tools, approvals, and parallel tool execution | In progress |
-| Live HTTP transport, OpenAI adapter, context planning, session titles | Planned |
+| Live HTTP transport (reqwest) | Done |
+| Context planning, session titles | Planned |
 | Subagent tools, result delivery, steering, and limits on depth, count, and budget | Planned |
 | Recovering in-flight work after a restart | Planned |
 | Shared provider rate limiting and higher-throughput storage | Planned |
